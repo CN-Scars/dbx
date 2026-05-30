@@ -4,6 +4,14 @@ import { inspectConnectionStore } from "./connections.js";
 
 export const DIRECT_QUERY_TYPES = ["postgres", "redshift", "mysql", "doris", "starrocks", "sqlite", "gaussdb", "opengauss"] as const;
 
+export type DirectQueryType = (typeof DIRECT_QUERY_TYPES)[number];
+
+const DIRECT_QUERY_TYPE_SET = new Set<string>(DIRECT_QUERY_TYPES);
+
+export function isDirectQueryType(dbType: string): dbType is DirectQueryType {
+  return DIRECT_QUERY_TYPE_SET.has(dbType);
+}
+
 export const BRIDGE_REQUIRED_TYPES = [
   "redis",
   "mongodb",

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { homedir, platform } from "node:os";
 import Database from "better-sqlite3";
 import { sqlSafetyFromEnv } from "./sql-safety.js";
+import { isDirectQueryType } from "./diagnostics.js";
 
 export interface TableInfo {
   name: string;
@@ -235,20 +236,6 @@ function isMysqlType(dbType: string): boolean {
   return dbType === "mysql" || dbType === "doris" || dbType === "starrocks";
 }
 
-function isDirectType(dbType: string): boolean {
-  switch (dbType) {
-    case "postgres":
-    case "redshift":
-    case "mysql":
-    case "doris":
-    case "starrocks":
-    case "sqlite":
-      return true;
-    default:
-      return false;
-  }
-}
-
 interface BridgeQueryResult {
   columns: string[];
   rows: unknown[][];
@@ -444,7 +431,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.countDocuments({}), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
     );
   }
-  if (isDirectType(config.db_type)) {
+  if (isDirectQueryType(config.db_type)) {
     return query(config, sql, undefined, options);
   }
   const result = await withTimeout(bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
@@ -471,7 +458,7 @@ export async function listTables(config: ConnectionConfig, schema?: string): Pro
     );
     return result.rows.map((r) => ({ name: String(r.name || ""), type: String(r.type || "table") }));
   }
-  if (!isDirectType(config.db_type)) {
+  if (!isDirectQueryType(config.db_type)) {
     const tables = await bridgeDataRequest<BridgeTableInfo[]>("/data/list-tables", {
       connection_name: config.name,
       database: config.database || "",
@@ -508,7 +495,7 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
       comment: null,
     }));
   }
-  if (!isDirectType(config.db_type)) {
+  if (!isDirectQueryType(config.db_type)) {
     const columns = await bridgeDataRequest<BridgeColumnInfo[]>("/data/describe-table", {
       connection_name: config.name,
       database: config.database || "",

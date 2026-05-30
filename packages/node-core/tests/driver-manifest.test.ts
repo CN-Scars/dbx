@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { BRIDGE_REQUIRED_TYPES, DIRECT_QUERY_TYPES } from "../src/diagnostics.js";
+import { BRIDGE_REQUIRED_TYPES, DIRECT_QUERY_TYPES, isDirectQueryType } from "../src/diagnostics.js";
 
 interface DriverManifest {
   drivers: Array<{
@@ -23,4 +23,14 @@ test("diagnostic query mode lists match the driver manifest", () => {
 
   assert.deepEqual([...DIRECT_QUERY_TYPES].sort(), directTypes.sort());
   assert.deepEqual([...BRIDGE_REQUIRED_TYPES].sort(), bridgeTypes.sort());
+});
+
+test("runtime direct query routing matches diagnostic direct query types", () => {
+  for (const dbType of DIRECT_QUERY_TYPES) {
+    assert.equal(isDirectQueryType(dbType), true, `${dbType} should use direct query routing`);
+  }
+
+  for (const dbType of BRIDGE_REQUIRED_TYPES) {
+    assert.equal(isDirectQueryType(dbType), false, `${dbType} should not use direct query routing`);
+  }
 });
