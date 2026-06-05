@@ -5,6 +5,7 @@ import {
   removeConnection as desktopRemoveConnection,
 } from "./connections.js";
 import {
+  closeDatabaseResources as desktopCloseDatabaseResources,
   describeTable as desktopDescribeTable,
   executeQuery as desktopExecuteQuery,
   listTables as desktopListTables,
@@ -20,6 +21,7 @@ export interface Backend {
   listTables(config: ConnectionConfig, schema?: string): Promise<TableInfo[]>;
   describeTable(config: ConnectionConfig, table: string, schema?: string): Promise<ColumnInfo[]>;
   executeQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult>;
+  close?(): Promise<void>;
 }
 
 export async function createBackend(env: NodeJS.ProcessEnv = process.env): Promise<Backend> {
@@ -35,5 +37,6 @@ export async function createBackend(env: NodeJS.ProcessEnv = process.env): Promi
     listTables: desktopListTables,
     describeTable: desktopDescribeTable,
     executeQuery: desktopExecuteQuery,
+    close: desktopCloseDatabaseResources,
   };
 }

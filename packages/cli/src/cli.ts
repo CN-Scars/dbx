@@ -24,6 +24,7 @@ export interface CliResult {
 
 interface RunOptions {
   backend?: Backend;
+  backendFactory?: (env?: NodeJS.ProcessEnv) => Promise<Backend>;
   env?: NodeJS.ProcessEnv;
   diagnostics?: () => Promise<DbxDiagnostics>;
 }
@@ -56,6 +57,7 @@ class CliError extends Error {
 
 export async function runCli(argv: string[], options: RunOptions = {}): Promise<CliResult> {
   const env = options.env ?? process.env;
+  let ownedBackend: Backend | undefined;
 
   try {
     const flags = parseFlags(argv);
@@ -69,7 +71,8 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       return ok(`${usage()}\n`);
     }
 
-    const backend = options.backend ?? (await createBackend(env));
+    const backendFactory = options.backendFactory ?? createBackend;
+    const backend = options.backend ?? (ownedBackend = await backendFactory(env));
 
     if (args[0] === "doctor") {
       ensureArgCount(args, 1, "dbx doctor");
@@ -242,6 +245,8 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
           : "ERROR";
     const wantsJson = argv.includes("--json");
     return fail(code, message, wantsJson);
+  } finally {
+    await ownedBackend?.close?.().catch(() => {});
   }
 }
 

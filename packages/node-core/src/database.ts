@@ -54,7 +54,7 @@ interface RqliteResponse {
 }
 
 const pools = new Map<string, PoolEntry>();
-const proxyTunnels = new Map<string, { server: Server; port: number }>();
+const proxyTunnels = new Map<string, { server: Server; port: number; sockets: Set<Socket> }>();
 
 function poolKey(config: ConnectionConfig): string {
   return `${config.id}:${config.database || ""}`;
@@ -62,6 +62,7 @@ function poolKey(config: ConnectionConfig): string {
 
 function evictPool(key: string, entry: PoolEntry) {
   pools.delete(key);
+  clearTimeout(entry.timer);
   if (entry.type === "pg") {
     (entry.pool as import("pg").Pool).end().catch(() => {});
   } else {
@@ -72,6 +73,33 @@ function evictPool(key: string, entry: PoolEntry) {
 function resetIdleTimer(key: string, entry: PoolEntry) {
   clearTimeout(entry.timer);
   entry.timer = setTimeout(() => evictPool(key, entry), IDLE_TIMEOUT_MS);
+}
+
+export async function closeDatabaseResources(): Promise<void> {
+  const poolEntries = [...pools.entries()];
+  pools.clear();
+  await Promise.all(
+    poolEntries.map(async ([, entry]) => {
+      clearTimeout(entry.timer);
+      if (entry.type === "pg") {
+        await (entry.pool as import("pg").Pool).end().catch(() => {});
+      } else {
+        await (entry.pool as import("mysql2/promise").Pool).end().catch(() => {});
+      }
+    }),
+  );
+
+  const tunnels = [...proxyTunnels.values()];
+  proxyTunnels.clear();
+  await Promise.all(
+    tunnels.map(
+      ({ server, sockets }) =>
+        new Promise<void>((resolve) => {
+          for (const socket of sockets) socket.destroy();
+          server.close(() => resolve());
+        }),
+    ),
+  );
 }
 
 async function getPgPool(config: ConnectionConfig): Promise<import("pg").Pool> {
@@ -124,9 +152,14 @@ async function connectionEndpoint(config: ConnectionConfig): Promise<{ host: str
   const existing = proxyTunnels.get(config.id);
   if (existing) return { host: "127.0.0.1", port: existing.port };
 
+  const sockets = new Set<Socket>();
   const server = createServer((inbound) => {
+    sockets.add(inbound);
+    inbound.once("close", () => sockets.delete(inbound));
     connectViaProxy(config)
       .then((outbound) => {
+        sockets.add(outbound);
+        outbound.once("close", () => sockets.delete(outbound));
         inbound.pipe(outbound);
         outbound.pipe(inbound);
       })
@@ -140,7 +173,7 @@ async function connectionEndpoint(config: ConnectionConfig): Promise<{ host: str
       else reject(new Error("Failed to bind proxy tunnel"));
     });
   });
-  proxyTunnels.set(config.id, { server, port });
+  proxyTunnels.set(config.id, { server, port, sockets });
   return { host: "127.0.0.1", port };
 }
 

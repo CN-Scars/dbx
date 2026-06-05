@@ -87,6 +87,54 @@ test("runs read query as json", async () => {
   });
 });
 
+test("closes backend resources created by the CLI", async () => {
+  let closed = false;
+  const result = await runCli(["query", "local", "select count(*) as total from users", "--json"], {
+    backendFactory: async () =>
+      fakeBackend({
+        close: async () => {
+          closed = true;
+        },
+      }),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(closed, true);
+});
+
+test("closes backend resources created by the CLI after failures", async () => {
+  let closed = false;
+  const result = await runCli(["query", "local", "select count(*) as total from users", "--json"], {
+    backendFactory: async () =>
+      fakeBackend({
+        executeQuery: async () => {
+          throw new Error("boom");
+        },
+        close: async () => {
+          closed = true;
+        },
+      }),
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(JSON.parse(result.stderr).error.message, "boom");
+  assert.equal(closed, true);
+});
+
+test("does not close caller-provided backend resources", async () => {
+  let closed = false;
+  const result = await runCli(["query", "local", "select count(*) as total from users", "--json"], {
+    backend: fakeBackend({
+      close: async () => {
+        closed = true;
+      },
+    }),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(closed, false);
+});
+
 test("runs query as csv", async () => {
   const result = await runCli(["query", "local", "select count(*) as total from users", "--format", "csv"], {
     backend: fakeBackend(),
