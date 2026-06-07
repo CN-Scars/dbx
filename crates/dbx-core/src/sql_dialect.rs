@@ -212,6 +212,7 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
         Some(DatabaseType::Jdbc) => format!("`{}`", name.replace('`', "``")),
         Some(
             DatabaseType::Mysql
+            | DatabaseType::StarRocks
             | DatabaseType::Hive
             | DatabaseType::Tdengine
             | DatabaseType::Access
@@ -459,6 +460,7 @@ mod tests {
     #[test]
     fn quotes_identifiers_by_database_type() {
         assert_eq!(quote_table_identifier(Some(DatabaseType::Mysql), "user`name"), "`user``name`");
+        assert_eq!(quote_table_identifier(Some(DatabaseType::StarRocks), "user`name"), "`user``name`");
         assert_eq!(quote_table_identifier(Some(DatabaseType::SqlServer), "user]name"), "[user]]name]");
         assert_eq!(quote_table_identifier(Some(DatabaseType::Postgres), "user\"name"), "\"user\"\"name\"");
         assert_eq!(quote_table_identifier(Some(DatabaseType::Informix), "users_1"), "users_1");
@@ -542,6 +544,17 @@ mod tests {
         );
         assert_eq!(
             build_table_select_sql(TableSelectSqlOptions {
+                database_type: Some(DatabaseType::StarRocks),
+                schema: None,
+                table_name: "sales_report",
+                columns: &["customer_name".to_string()],
+                order_columns: &[],
+                limit: 100,
+            }),
+            "SELECT `customer_name` FROM `sales_report` LIMIT 100;"
+        );
+        assert_eq!(
+            build_table_select_sql(TableSelectSqlOptions {
                 database_type: Some(DatabaseType::Iris),
                 schema: Some("Ens"),
                 table_name: "AlarmResponse",
@@ -597,6 +610,22 @@ mod tests {
                 include_row_id: false,
             }),
             "SELECT * FROM \"public\".\"orders\" WHERE (amount > 10) LIMIT 50 OFFSET 100;"
+        );
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::StarRocks),
+                schema: None,
+                table_name: "sales_report".to_string(),
+                primary_keys: Vec::new(),
+                columns: vec!["customer_name".to_string(), "amount".to_string()],
+                fallback_order_columns: Vec::new(),
+                order_by: None,
+                limit: Some(100),
+                offset: None,
+                where_input: Some("`customer_name` = 'Acme'".to_string()),
+                include_row_id: false,
+            }),
+            "SELECT * FROM `sales_report` WHERE (`customer_name` = 'Acme') LIMIT 100;"
         );
         assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {
