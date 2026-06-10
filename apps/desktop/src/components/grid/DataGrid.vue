@@ -4,7 +4,7 @@ const globalDdlOpen = ref(false);
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, useSlots, watch, defineAsyncComponent, type Component } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, useSlots, watch, defineAsyncComponent, type Component, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   ArrowUp,
@@ -1346,6 +1346,17 @@ const rowStatusFilter = ref<RowStatusFilter>("all");
 const gridRef = ref<HTMLDivElement>();
 const headerRef = ref<HTMLDivElement>();
 const gridScrollbarGutter = ref(0);
+const gridHorizontalScrollbarTrackRef = ref<HTMLDivElement>();
+const hasGridHorizontalOverflow = ref(false);
+const gridHorizontalScrollbarThumbLeftPercent = ref(0);
+const gridHorizontalScrollbarThumbWidthPercent = ref(100);
+const gridHorizontalScrollbarDragging = ref(false);
+let gridHorizontalScrollbarFrame = 0;
+let gridHorizontalScrollbarResizeObserver: ResizeObserver | null = null;
+let gridHorizontalScrollbarDragState: {
+  trackRect: DOMRect;
+  thumbOffsetPx: number;
+} | null = null;
 const hiddenColumnIndexes = ref<Set<number>>(new Set());
 const nullColumnsHidden = ref(false);
 const autoHiddenNullColumnIndexes = ref<Set<number>>(new Set());
@@ -1502,7 +1513,121 @@ const renderedColumnOffsets = computed(() => {
 function updateGridHorizontalViewport(element: HTMLElement) {
   gridHorizontalScrollLeft.value = element.scrollLeft;
   gridViewportWidth.value = element.clientWidth;
+  updateGridHorizontalScrollbar(element);
 }
+
+function gridScrollerElement(): HTMLElement | null {
+  return gridRef.value?.querySelector<HTMLElement>(".data-grid-scroller") ?? null;
+}
+
+function updateGridHorizontalScrollbar(element: HTMLElement | null = gridScrollerElement()) {
+  if (!element) {
+    hasGridHorizontalOverflow.value = false;
+    gridHorizontalScrollbarThumbLeftPercent.value = 0;
+    gridHorizontalScrollbarThumbWidthPercent.value = 100;
+    return;
+  }
+
+  const maxScrollLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+  hasGridHorizontalOverflow.value = maxScrollLeft > 1;
+
+  const rawThumbWidth = element.scrollWidth > 0 ? (element.clientWidth / element.scrollWidth) * 100 : 100;
+  const thumbWidth = Math.min(100, Math.max(6, rawThumbWidth));
+  const thumbTravel = Math.max(0, 100 - thumbWidth);
+  gridHorizontalScrollbarThumbWidthPercent.value = thumbWidth;
+  gridHorizontalScrollbarThumbLeftPercent.value = maxScrollLeft > 0 ? (element.scrollLeft / maxScrollLeft) * thumbTravel : 0;
+}
+
+function scheduleGridHorizontalScrollbarUpdate() {
+  if (gridHorizontalScrollbarFrame) return;
+  const update = () => {
+    gridHorizontalScrollbarFrame = 0;
+    updateGridHorizontalScrollbar();
+  };
+  if (typeof requestAnimationFrame === "function") {
+    gridHorizontalScrollbarFrame = requestAnimationFrame(update);
+  } else {
+    window.setTimeout(update, 0);
+  }
+}
+
+function observeGridHorizontalScrollbarScroller() {
+  gridHorizontalScrollbarResizeObserver?.disconnect();
+  gridHorizontalScrollbarResizeObserver = null;
+  const scroller = gridScrollerElement();
+  if (scroller && typeof ResizeObserver !== "undefined") {
+    gridHorizontalScrollbarResizeObserver = new ResizeObserver(scheduleGridHorizontalScrollbarUpdate);
+    gridHorizontalScrollbarResizeObserver.observe(scroller);
+    for (const child of Array.from(scroller.children)) {
+      gridHorizontalScrollbarResizeObserver.observe(child);
+    }
+  }
+  scheduleGridHorizontalScrollbarUpdate();
+}
+
+function applyGridHorizontalScrollbarDrag(clientX: number) {
+  const scroller = gridScrollerElement();
+  const dragState = gridHorizontalScrollbarDragState;
+  if (!scroller || !dragState) return;
+
+  const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+  if (maxScrollLeft <= 1) return;
+
+  const thumbWidthPx = dragState.trackRect.width * (gridHorizontalScrollbarThumbWidthPercent.value / 100);
+  const maxThumbLeftPx = Math.max(1, dragState.trackRect.width - thumbWidthPx);
+  const thumbLeftPx = Math.min(maxThumbLeftPx, Math.max(0, clientX - dragState.trackRect.left - dragState.thumbOffsetPx));
+  scroller.scrollLeft = (thumbLeftPx / maxThumbLeftPx) * maxScrollLeft;
+  updateGridHorizontalViewport(scroller);
+  if (headerRef.value) headerRef.value.scrollLeft = scroller.scrollLeft;
+  if (useCanvasGridRows.value) {
+    syncCanvasViewport();
+  }
+}
+
+function onGridHorizontalScrollbarPointerMove(event: PointerEvent) {
+  if (!gridHorizontalScrollbarDragState) return;
+  event.preventDefault();
+  applyGridHorizontalScrollbarDrag(event.clientX);
+}
+
+function stopGridHorizontalScrollbarDrag() {
+  if (!gridHorizontalScrollbarDragState) return;
+  gridHorizontalScrollbarDragState = null;
+  gridHorizontalScrollbarDragging.value = false;
+  window.removeEventListener("pointermove", onGridHorizontalScrollbarPointerMove, true);
+  window.removeEventListener("pointerup", stopGridHorizontalScrollbarDrag, true);
+  window.removeEventListener("pointercancel", stopGridHorizontalScrollbarDrag, true);
+  document.body.style.userSelect = "";
+}
+
+function startGridHorizontalScrollbarDrag(event: PointerEvent) {
+  const scroller = gridScrollerElement();
+  const track = gridHorizontalScrollbarTrackRef.value;
+  if (!scroller || !track || !hasGridHorizontalOverflow.value) return;
+
+  const trackRect = track.getBoundingClientRect();
+  const thumbLeftPx = trackRect.width * (gridHorizontalScrollbarThumbLeftPercent.value / 100);
+  const thumbWidthPx = trackRect.width * (gridHorizontalScrollbarThumbWidthPercent.value / 100);
+  const pointerX = event.clientX - trackRect.left;
+  const pointerInsideThumb = pointerX >= thumbLeftPx && pointerX <= thumbLeftPx + thumbWidthPx;
+
+  gridHorizontalScrollbarDragState = {
+    trackRect,
+    thumbOffsetPx: pointerInsideThumb ? pointerX - thumbLeftPx : thumbWidthPx / 2,
+  };
+  gridHorizontalScrollbarDragging.value = true;
+  document.body.style.userSelect = "none";
+  window.addEventListener("pointermove", onGridHorizontalScrollbarPointerMove, true);
+  window.addEventListener("pointerup", stopGridHorizontalScrollbarDrag, true);
+  window.addEventListener("pointercancel", stopGridHorizontalScrollbarDrag, true);
+  event.preventDefault();
+  applyGridHorizontalScrollbarDrag(event.clientX);
+}
+
+const gridHorizontalScrollbarThumbStyle = computed<CSSProperties>(() => ({
+  width: `${gridHorizontalScrollbarThumbWidthPercent.value}%`,
+  left: `${gridHorizontalScrollbarThumbLeftPercent.value}%`,
+}));
 
 function updateGridScrollbarGutter(element: HTMLElement) {
   gridScrollbarGutter.value = scrollbarGutterWidth(element);
@@ -1516,6 +1641,7 @@ function refreshGridScrollerMetrics() {
   if (headerRef.value) {
     headerRef.value.scrollLeft = scrollerEl.scrollLeft;
   }
+  observeGridHorizontalScrollbarScroller();
 }
 
 function syncHeaderScroll(e: Event) {
@@ -3233,6 +3359,17 @@ let canvasPixelRatioFrame = 0;
 let canvasDrawFrame = 0;
 let dataGridIsActive = true;
 
+watch(
+  () => [totalWidth.value, displayRowCount.value, useCanvasGridRows.value, props.result.columns.join("\u0000")],
+  () => {
+    nextTick(() => {
+      refreshGridScrollerMetrics();
+      observeGridHorizontalScrollbarScroller();
+    });
+  },
+  { flush: "post" },
+);
+
 function toggleDataGridRenderMode() {
   settingsStore.updateEditorSettings({
     dataGridRenderMode: dataGridRenderMode.value === "canvas" ? "dom" : "canvas",
@@ -3679,7 +3816,11 @@ function pauseCanvasGridWork() {
 
 function resumeCanvasGridWork() {
   dataGridIsActive = true;
-  nextTick(attachCanvasResizeObserver);
+  nextTick(() => {
+    attachCanvasResizeObserver();
+    refreshGridScrollerMetrics();
+    observeGridHorizontalScrollbarScroller();
+  });
 }
 
 onMounted(resumeCanvasGridWork);
@@ -3693,6 +3834,11 @@ onMounted(() => {
 onDeactivated(pauseCanvasGridWork);
 onUnmounted(() => {
   pauseCanvasGridWork();
+  gridHorizontalScrollbarResizeObserver?.disconnect();
+  stopGridHorizontalScrollbarDrag();
+  if (gridHorizontalScrollbarFrame && typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(gridHorizontalScrollbarFrame);
+  }
   if (typeof window === "undefined") return;
   window.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
   window.visualViewport?.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
@@ -6631,6 +6777,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   </div>
                 </template>
               </RecycleScroller>
+              <div v-if="hasGridHorizontalOverflow" ref="gridHorizontalScrollbarTrackRef" class="data-grid-horizontal-scrollbar" :class="{ 'data-grid-horizontal-scrollbar--dragging': gridHorizontalScrollbarDragging }" @pointerdown="startGridHorizontalScrollbarDrag">
+                <div class="data-grid-horizontal-scrollbar__thumb" :style="gridHorizontalScrollbarThumbStyle" />
+              </div>
               <div v-if="loading" class="absolute inset-0 z-20 bg-background/50 flex items-center justify-center">
                 <div class="flex items-center gap-2 px-3 py-1.5 rounded-md bg-background border shadow-sm text-xs text-muted-foreground">
                   <Loader2 class="w-3.5 h-3.5 animate-spin" />
@@ -7481,6 +7630,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   scrollbar-gutter: stable;
   will-change: scroll-position;
   contain: layout style paint;
+  scrollbar-width: none;
+}
+
+.data-grid-scroller::-webkit-scrollbar {
+  display: none;
 }
 
 .data-grid-scroller :deep(.vue-recycle-scroller__item-wrapper) {
@@ -7494,6 +7648,46 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .data-grid-scroller.is-scrolling :deep(.vue-recycle-scroller__item-view) {
   pointer-events: none;
+}
+
+.data-grid-horizontal-scrollbar {
+  position: absolute;
+  inset-inline: calc(var(--row-num-w) + 8px) 10px;
+  bottom: 8px;
+  z-index: 30;
+  height: 10px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.data-grid-horizontal-scrollbar::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 4px;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 12%, transparent);
+}
+
+.data-grid-horizontal-scrollbar__thumb {
+  position: absolute;
+  top: 3px;
+  height: 4px;
+  min-width: 24px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 42%, transparent);
+  transition:
+    height 120ms ease,
+    background-color 120ms ease,
+    top 120ms ease;
+}
+
+.data-grid-horizontal-scrollbar:hover .data-grid-horizontal-scrollbar__thumb,
+.data-grid-horizontal-scrollbar--dragging .data-grid-horizontal-scrollbar__thumb {
+  top: 2px;
+  height: 6px;
+  background: color-mix(in oklch, var(--foreground) 62%, transparent);
 }
 
 .canvas-grid-surface {
