@@ -1460,6 +1460,26 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              GROUP BY i.relname, i.oid, ix.indisunique, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indkey \
              ORDER BY i.relname";
 
+const POSTGRES_OWNERS_SQL: &str =
+    "SELECT n.nspname, c.relname, c.relkind::text AS relkind, pg_get_userbyid(c.relowner) \
+     FROM pg_class c \
+     JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 \
+       AND c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')";
+
+fn postgres_owner_object_type(relkind: &str) -> &str {
+    match relkind {
+        "r" => "TABLE",
+        "v" => "VIEW",
+        "m" => "MATERIALIZED_VIEW",
+        "S" => "SEQUENCE",
+        "f" => "FOREIGN TABLE",
+        "p" => "PARTITIONED TABLE",
+        "I" => "PARTITIONED INDEX",
+        _ => relkind,
+    }
+}
+
 async fn list_indexes_with_sql(
     client: &deadpool_postgres::Client,
     sql: &str,
@@ -1703,37 +1723,16 @@ pub async fn list_rules(pool: &Pool, schema: &str) -> Result<Vec<RuleInfo>, Stri
 
 pub async fn list_owners(pool: &Pool, schema: &str) -> Result<Vec<OwnerInfo>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
-    // Filter relkind to exclude indexes, toast tables, and other system objects
-    // for better performance on large databases
-    let stmt = client
-        .prepare_cached(
-            "SELECT n.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner) \
-             FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = $1 \
-               AND c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+    let stmt = client.prepare_cached(POSTGRES_OWNERS_SQL).await.map_err(|e| e.to_string())?;
     let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
         .map(|row| {
             let relkind: String = row.get(2);
-            let object_type = match relkind.as_str() {
-                "r" => "TABLE",
-                "v" => "VIEW",
-                "m" => "MATERIALIZED_VIEW",
-                "S" => "SEQUENCE",
-                "f" => "FOREIGN TABLE",
-                "p" => "PARTITIONED TABLE",
-                "I" => "PARTITIONED INDEX",
-                _ => &relkind,
-            };
             OwnerInfo {
                 object_name: row.get::<_, String>(1),
-                object_type: object_type.to_string(),
+                object_type: postgres_owner_object_type(&relkind).to_string(),
                 owner: row.get::<_, String>(3),
             }
         })
@@ -2178,6 +2177,23 @@ mod tests {
         assert!(POSTGRES_INDEXES_SQL.contains("ix.indnkeyatts"));
         assert!(!POSTGRES_INDEXES_COMPAT_SQL.contains("ix.indnkeyatts"));
         assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("NULL::smallint AS nkeyatts"));
+    }
+
+    #[test]
+    fn postgres_owner_metadata_casts_relkind_to_text() {
+        assert!(POSTGRES_OWNERS_SQL.contains("c.relkind::text AS relkind"));
+        assert!(POSTGRES_OWNERS_SQL.contains("c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')"));
+    }
+
+    #[test]
+    fn postgres_owner_object_type_maps_relkind_codes() {
+        assert_eq!(postgres_owner_object_type("r"), "TABLE");
+        assert_eq!(postgres_owner_object_type("v"), "VIEW");
+        assert_eq!(postgres_owner_object_type("m"), "MATERIALIZED_VIEW");
+        assert_eq!(postgres_owner_object_type("S"), "SEQUENCE");
+        assert_eq!(postgres_owner_object_type("f"), "FOREIGN TABLE");
+        assert_eq!(postgres_owner_object_type("p"), "PARTITIONED TABLE");
+        assert_eq!(postgres_owner_object_type("?"), "?");
     }
 
     #[test]
