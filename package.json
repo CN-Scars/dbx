@@ -17,6 +17,7 @@
     "build": "vite build --config apps/desktop/vite.config.ts",
     "build:checked": "pnpm typecheck && pnpm build",
     "check": "node scripts/run-check.mjs",
+    "bench:redis-key-search": "node scripts/bench/redis-key-search.mjs",
     "lint": "oxlint --vue-plugin apps/desktop/src",
     "fmt": "oxfmt \"apps/desktop/src/**/*.{ts,vue}\"",
     "test": "vitest run",

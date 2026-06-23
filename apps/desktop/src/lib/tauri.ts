@@ -1105,10 +1105,10 @@ export async function getAppVersion(): Promise<string> {
 export interface RedisKeyInfo {
   key_display: string;
   key_raw: string;
-  key_type: string;
-  ttl: number;
-  size: number;
-  value_preview: string;
+  key_type?: string;
+  ttl?: number;
+  size?: number;
+  value_preview?: string;
 }
 
 export interface RedisDatabaseInfo {
