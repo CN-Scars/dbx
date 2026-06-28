@@ -23,6 +23,7 @@ use crate::types::{
 use super::file_validator::validate_file_path;
 
 pub type MySqlPool = mysql_async::Pool;
+const MYSQL_TCP_KEEPALIVE_MS: u32 = 30_000;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MySqlQueryDialect {
@@ -456,7 +457,7 @@ fn create_pool(
         .stmt_cache_size(0)
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
-        .tcp_keepalive(Some(30u32))
+        .tcp_keepalive(Some(MYSQL_TCP_KEEPALIVE_MS))
         .setup(mysql_setup_queries(url));
     if let Some(ssl_opts) = mysql_ssl_opts(base_ssl_opts, url, ca_cert_path, &tls_url.files)? {
         builder = builder.ssl_opts(ssl_opts);
@@ -3417,6 +3418,12 @@ UNIQUE KEY(`tenant_id`, `name``part`)
             server closed session with no notification";
 
         assert!(mysql_error_should_retry_without_ssl(error));
+    }
+
+    #[test]
+    fn mysql_tcp_keepalive_uses_milliseconds_not_seconds() {
+        assert_eq!(MYSQL_TCP_KEEPALIVE_MS, 30_000);
+        assert!(MYSQL_TCP_KEEPALIVE_MS >= 1_000);
     }
 
     #[test]
