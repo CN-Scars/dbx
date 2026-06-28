@@ -846,6 +846,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_drop_collection,
             commands::mongo_cmd::document_find_documents,
             commands::mongo_cmd::mongo_find_documents,
+            commands::mongo_cmd::mongo_server_version,
             commands::mongo_cmd::mongo_aggregate_documents,
             commands::mongo_cmd::mongo_insert_document,
             commands::mongo_cmd::mongo_insert_documents,

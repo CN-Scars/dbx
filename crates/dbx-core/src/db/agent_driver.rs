@@ -243,16 +243,18 @@ pub enum MongoAgentMethod {
     ListDatabases,
     ListCollections,
     FindDocuments,
+    ServerVersion,
     InsertDocument,
     UpdateDocument,
     DeleteDocument,
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
+        Self::ServerVersion,
         Self::InsertDocument,
         Self::UpdateDocument,
         Self::DeleteDocument,
@@ -263,6 +265,7 @@ impl MongoAgentMethod {
             Self::ListDatabases => "list_databases",
             Self::ListCollections => "list_collections",
             Self::FindDocuments => "find_documents",
+            Self::ServerVersion => "server_version",
             Self::InsertDocument => "insert_document",
             Self::UpdateDocument => "update_document",
             Self::DeleteDocument => "delete_document",
@@ -921,6 +924,13 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::FindDocuments, params).await
     }
 
+    pub async fn mongo_server_version<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::ServerVersion, mongo_database_params(database)).await
+    }
+
     pub async fn mongo_insert_document<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -1461,6 +1471,7 @@ mod tests {
         assert_eq!(MongoAgentMethod::ListDatabases.as_str(), "list_databases");
         assert_eq!(MongoAgentMethod::ListCollections.as_str(), "list_collections");
         assert_eq!(MongoAgentMethod::FindDocuments.as_str(), "find_documents");
+        assert_eq!(MongoAgentMethod::ServerVersion.as_str(), "server_version");
         assert_eq!(MongoAgentMethod::InsertDocument.as_str(), "insert_document");
         assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
         assert_eq!(MongoAgentMethod::DeleteDocument.as_str(), "delete_document");
@@ -1500,6 +1511,7 @@ mod tests {
         let _mongo_list_databases = AgentDriverClient::mongo_list_databases::<serde_json::Value>;
         let _mongo_list_collections = AgentDriverClient::mongo_list_collections::<serde_json::Value>;
         let _mongo_find_documents = AgentDriverClient::mongo_find_documents::<serde_json::Value>;
+        let _mongo_server_version = AgentDriverClient::mongo_server_version::<serde_json::Value>;
         let _mongo_insert_document = AgentDriverClient::mongo_insert_document::<serde_json::Value>;
         let _mongo_update_document = AgentDriverClient::mongo_update_document::<serde_json::Value>;
         let _mongo_delete_document = AgentDriverClient::mongo_delete_document::<serde_json::Value>;

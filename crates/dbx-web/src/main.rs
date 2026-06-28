@@ -365,6 +365,7 @@ async fn main() {
         .route("/mongo/drop-collection", post(routes::mongo::drop_collection))
         .route("/document-store/find-documents", post(routes::mongo::document_find_documents))
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
+        .route("/mongo/server-version", post(routes::mongo::server_version))
         .route("/mongo/aggregate-documents", post(routes::mongo::aggregate_documents))
         .route("/mongo/insert-document", post(routes::mongo::insert_document))
         .route("/mongo/insert-documents", post(routes::mongo::insert_documents))

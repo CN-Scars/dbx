@@ -396,7 +396,7 @@ async function load() {
   try {
     const filter = currentDocumentFilter();
     const sort = sortInput.value.trim() || undefined;
-    const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize.value, pageSize.value, filter, sort, executionId);
+    const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize.value, pageSize.value, filter, undefined, sort, executionId);
     if (documentLoadExecutionId.value !== executionId) return;
     const nextDocuments = result.documents.map(asRecord);
     documents.value = nextDocuments;

@@ -10,6 +10,7 @@ import {
   parseMongoCountDocumentsCommand,
   parseMongoFindCommand,
   parseMongoGetIndexesCommand,
+  parseMongoVersionCommand,
   parseMongoWriteCommand,
 } from "../../apps/desktop/src/lib/mongoShellCommand.ts";
 import { buildMongoUpdateDocument as buildMongoDocumentUpdate, formatMongoShellLiteral as formatMongoDocumentShellLiteral } from "../../apps/desktop/src/lib/mongoDocumentValues.ts";
@@ -67,8 +68,26 @@ test("parseMongoFindCommand accepts single-quoted string values and unquoted sor
   assert.deepEqual(JSON.parse(command.sort || "{}"), { price: -1 });
 });
 
+test("parseMongoFindCommand parses projection arguments", () => {
+  const command = parseMongoFindCommand(`db.jobs.find({ status: "open" }, {
+    title: 1,
+    _id: 0
+  }).sort({ title: 1 })`);
+  assert.ok(command);
+  assert.equal(command.collection, "jobs");
+  assert.deepEqual(JSON.parse(command.filter), { status: "open" });
+  assert.deepEqual(JSON.parse(command.projection || "{}"), { title: 1, _id: 0 });
+  assert.deepEqual(JSON.parse(command.sort || "{}"), { title: 1 });
+});
+
 test("parseMongoFindCommand rejects unsupported mongo shell commands", () => {
   assert.equal(parseMongoFindCommand("db.users.drop()"), null);
+  assert.equal(parseMongoFindCommand("db.users.find({}, {}, { hint: { name: 1 } })"), null);
+});
+
+test("parseMongoVersionCommand parses db.version", () => {
+  assert.deepEqual(parseMongoVersionCommand("db.version();"), { kind: "version" });
+  assert.equal(parseMongoVersionCommand("db.jobs.version()"), null);
 });
 
 test("parseMongoWriteCommand accepts unquoted insert and update commands", () => {
