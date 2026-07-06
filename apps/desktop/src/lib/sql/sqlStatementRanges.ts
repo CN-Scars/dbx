@@ -401,6 +401,26 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
   return null;
 }
 
+export function mongoCommandRangeAtCursor(sql: string, cursorPos: number): SqlTextRange | null {
+  const pos = clampCursor(sql, cursorPos);
+  if (isCursorOnBlankLine(sql, pos)) return null;
+
+  const commands = splitMongoCommandRanges(sql);
+  for (let index = 0; index < commands.length; index += 1) {
+    const command = commands[index];
+    const range = { from: command.from, to: command.to, sql: command.text };
+
+    if (pos >= command.from && pos <= command.to) return range;
+
+    const next = commands[index + 1];
+    if (pos > command.to && (!next || pos < next.from) && isCursorInSameLineDelimiterGap(sql, command.to, pos)) return range;
+
+    if (pos < command.from && sql.slice(pos, command.from).trim() === "" && isCursorOnStatementLine(sql, pos, command)) return range;
+  }
+
+  return null;
+}
+
 function isCursorInSameLineDelimiterGap(sql: string, previousStatementEnd: number, cursorPos: number): boolean {
   if (cursorPos <= previousStatementEnd) return false;
   const between = sql.slice(previousStatementEnd, cursorPos);
@@ -1433,7 +1453,7 @@ function isCursorOnBlankLine(sql: string, pos: number): boolean {
   return sql.slice(lineStart, lineEnd).trim() === "";
 }
 
-function isCursorOnStatementLine(sql: string, pos: number, statement: RawStatement): boolean {
+function isCursorOnStatementLine(sql: string, pos: number, statement: Pick<RawStatement, "from">): boolean {
   const lineStart = sql.lastIndexOf("\n", pos - 1) + 1;
   let lineEnd = sql.indexOf("\n", pos);
   if (lineEnd === -1) lineEnd = sql.length;
