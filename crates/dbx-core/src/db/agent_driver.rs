@@ -254,6 +254,8 @@ pub enum MongoAgentMethod {
     FindDocuments,
     FindDocumentsExtendedJson,
     ServerVersion,
+    CreateIndex,
+    DropIndexes,
     InsertDocument,
     UpdateDocument,
     UpdateDocuments,
@@ -262,12 +264,14 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
         Self::FindDocumentsExtendedJson,
         Self::ServerVersion,
+        Self::CreateIndex,
+        Self::DropIndexes,
         Self::InsertDocument,
         Self::UpdateDocument,
         Self::UpdateDocuments,
@@ -282,6 +286,8 @@ impl MongoAgentMethod {
             Self::FindDocuments => "find_documents",
             Self::FindDocumentsExtendedJson => "find_documents_extended_json",
             Self::ServerVersion => "server_version",
+            Self::CreateIndex => "create_index",
+            Self::DropIndexes => "drop_indexes",
             Self::InsertDocument => "insert_document",
             Self::UpdateDocument => "update_document",
             Self::UpdateDocuments => "update_documents",
@@ -1004,6 +1010,20 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::ServerVersion, mongo_database_params(database)).await
     }
 
+    pub async fn mongo_create_index<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::CreateIndex, params).await
+    }
+
+    pub async fn mongo_drop_indexes<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::DropIndexes, params).await
+    }
+
     pub async fn mongo_insert_document<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -1676,6 +1696,8 @@ mod tests {
         assert_eq!(MongoAgentMethod::FindDocuments.as_str(), "find_documents");
         assert_eq!(MongoAgentMethod::FindDocumentsExtendedJson.as_str(), "find_documents_extended_json");
         assert_eq!(MongoAgentMethod::ServerVersion.as_str(), "server_version");
+        assert_eq!(MongoAgentMethod::CreateIndex.as_str(), "create_index");
+        assert_eq!(MongoAgentMethod::DropIndexes.as_str(), "drop_indexes");
         assert_eq!(MongoAgentMethod::InsertDocument.as_str(), "insert_document");
         assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
         assert_eq!(MongoAgentMethod::UpdateDocuments.as_str(), "update_documents");
@@ -1720,6 +1742,8 @@ mod tests {
         let _mongo_find_documents_extended_json =
             AgentDriverClient::mongo_find_documents_extended_json::<serde_json::Value>;
         let _mongo_server_version = AgentDriverClient::mongo_server_version::<serde_json::Value>;
+        let _mongo_create_index = AgentDriverClient::mongo_create_index::<serde_json::Value>;
+        let _mongo_drop_indexes = AgentDriverClient::mongo_drop_indexes::<serde_json::Value>;
         let _mongo_insert_document = AgentDriverClient::mongo_insert_document::<serde_json::Value>;
         let _mongo_update_document = AgentDriverClient::mongo_update_document::<serde_json::Value>;
         let _mongo_update_documents = AgentDriverClient::mongo_update_documents::<serde_json::Value>;
