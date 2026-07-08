@@ -1157,6 +1157,7 @@ fn is_jdbc_param(key: &str) -> bool {
             | "transformedbitisboolean"
             | "yearisdatetype"
             | "createdatabaseifnotexist"
+            | "allowmultiqueries"
             | "noaccesstoprocedurebodies"
             | "nullcatalogmeanscurrent"
             | "nullnamepatternmatchesall"
@@ -4127,7 +4128,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
 
     #[test]
     fn mysql_async_url_keeps_valid_params_while_stripping_jdbc() {
-        let url = "mysql://host:3306/db?useUnicode=true&characterEncoding=utf8&require_ssl=true&charset=utf8mb4&autoReconnect=true";
+        let url = "mysql://host:3306/db?useUnicode=true&characterEncoding=utf8&require_ssl=true&charset=utf8mb4&autoReconnect=true&allowMultiQueries=true";
         assert_eq!(mysql_async_url(url).as_ref(), "mysql://host:3306/db?require_ssl=true");
     }
 
