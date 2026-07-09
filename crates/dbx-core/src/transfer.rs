@@ -1011,6 +1011,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             if let Some(binary_literal) = format_postgres_binary_sql_literal(s, db_type, column_type) {
                 return binary_literal;
             }
+            if let Some(binary_literal) = format_mysql_binary_sql_literal(s, db_type, column_type) {
+                return binary_literal;
+            }
             if let Some(numeric_literal) = format_mysql_numeric_string_literal(s, db_type, column_type) {
                 return numeric_literal;
             }
@@ -1103,6 +1106,20 @@ fn format_postgres_binary_sql_literal(
     }
 
     Some(format!("decode('{hex}', 'hex')"))
+}
+
+fn format_mysql_binary_sql_literal(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> Option<String> {
+    if !matches!(db_type, DatabaseType::Mysql) || !column_type.is_some_and(is_binary_transfer_column_type) {
+        return None;
+    }
+
+    let trimmed = value.trim();
+    let hex = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))?;
+    if hex.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(if hex.is_empty() { "X''".to_string() } else { format!("0x{hex}") })
+    } else {
+        None
+    }
 }
 
 fn format_oracle_date_sql_literal(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> Option<String> {
@@ -5924,6 +5941,47 @@ mod tests {
             sql,
             r#"INSERT INTO "public"."files" ("id", "payload", "note") VALUES
 (1, decode('48656c6c6f', 'hex'), '0x48656c6c6f')"#
+        );
+    }
+
+    #[test]
+    fn mysql_insert_formats_blob_prefixed_hex_as_binary_literal() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("payload"), String::from("empty_blob"), String::from("note")],
+            &[
+                Some(String::from("int")),
+                Some(String::from("MEDIUMBLOB")),
+                Some(String::from("blob")),
+                Some(String::from("varchar(64)")),
+            ],
+            &[vec![json!(1), json!("0x0001ABff"), json!("0X"), json!("0x0001ABff")]],
+            "files",
+            "",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO `files` (`id`, `payload`, `empty_blob`, `note`) VALUES
+(1, 0x0001ABff, X'', '0x0001ABff')"#
+        );
+    }
+
+    #[test]
+    fn mysql_insert_keeps_invalid_blob_hex_as_string_literal() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("payload")],
+            &[Some(String::from("int")), Some(String::from("mediumblob"))],
+            &[vec![json!(1), json!("0xnothex")]],
+            "files",
+            "",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO `files` (`id`, `payload`) VALUES
+(1, '0xnothex')"#
         );
     }
 
