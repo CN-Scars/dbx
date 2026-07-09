@@ -23,6 +23,7 @@
     "build:checked": "pnpm typecheck && pnpm build",
     "check": "node scripts/run-check.mjs",
     "bench:redis-key-search": "node scripts/bench/redis-key-search.mjs",
+    "bench:mongodb-count": "node scripts/bench/mongodb-count.mjs",
     "lint": "oxlint --vue-plugin apps/desktop/src",
     "fmt": "oxfmt \"apps/desktop/src/**/*.{ts,vue}\"",
     "test": "vitest run",

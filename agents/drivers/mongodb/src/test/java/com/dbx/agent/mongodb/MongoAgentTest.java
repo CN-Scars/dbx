@@ -111,6 +111,18 @@ class MongoAgentTest {
     }
 
     @Test
+    void countDocumentsMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"count_documents\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\",\"filter\":\"{}\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(15, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
     void parsesOptionalDocumentParameters() {
         JsonObject params = new JsonObject();
         params.addProperty("projection", "{\"title\":1,\"_id\":0}");

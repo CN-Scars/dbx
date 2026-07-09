@@ -592,6 +592,29 @@ pub async fn find_documents(
     Ok(MongoDocumentResult { documents, total })
 }
 
+pub async fn count_documents(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter: Option<&str>,
+) -> Result<u64, String> {
+    let col = client.database(database).collection::<Document>(collection);
+
+    let filter_doc: Document = match filter {
+        Some(f) if !f.trim().is_empty() => {
+            let json: serde_json::Value = serde_json::from_str(f).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+            json_filter_to_document(&json)?
+        }
+        _ => doc! {},
+    };
+
+    if filter_doc.is_empty() {
+        col.estimated_document_count().await.map_err(|e| e.to_string())
+    } else {
+        col.count_documents(filter_doc).await.map_err(|e| e.to_string())
+    }
+}
+
 /// Find MongoDB documents as relaxed Extended JSON for MongoDB transfer paths.
 #[allow(clippy::too_many_arguments)]
 pub async fn find_documents_extended_json(

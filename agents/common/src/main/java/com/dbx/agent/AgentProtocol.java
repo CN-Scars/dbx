@@ -43,6 +43,7 @@ public final class AgentProtocol {
      * MongoDB read path that returns documents as relaxed Extended JSON for transfer.
      */
     public static final String MONGO_METHOD_FIND_DOCUMENTS_EXTENDED_JSON = "find_documents_extended_json";
+    public static final String MONGO_METHOD_COUNT_DOCUMENTS = "count_documents";
     public static final String MONGO_METHOD_SERVER_VERSION = "server_version";
     public static final String MONGO_METHOD_CREATE_INDEX = "create_index";
     public static final String MONGO_METHOD_DROP_INDEXES = "drop_indexes";
@@ -124,6 +125,7 @@ public final class AgentProtocol {
         MONGO_METHOD_LIST_COLLECTIONS,
         MONGO_METHOD_FIND_DOCUMENTS,
         MONGO_METHOD_FIND_DOCUMENTS_EXTENDED_JSON,
+        MONGO_METHOD_COUNT_DOCUMENTS,
         MONGO_METHOD_SERVER_VERSION,
         MONGO_METHOD_CREATE_INDEX,
         MONGO_METHOD_DROP_INDEXES,

@@ -1792,6 +1792,10 @@ export async function documentFindDocuments(connectionId: string, database: stri
   return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, projection, sort, executionId });
 }
 
+export async function mongoCountDocuments(connectionId: string, database: string, collection: string, filter?: string, executionId?: string): Promise<number> {
+  return invoke("mongo_count_documents", { connectionId, database, collection, filter, executionId });
+}
+
 export async function documentListGridFsFiles(connectionId: string, database: string, bucket: string, filter?: string, sort?: string): Promise<MongoGridFsFileInfo[]> {
   return invoke("document_list_gridfs_files", { connectionId, database, bucket, filter, sort });
 }

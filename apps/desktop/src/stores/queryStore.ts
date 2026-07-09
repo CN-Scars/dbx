@@ -2645,14 +2645,14 @@ export const useQueryStore = defineStore("query", () => {
               }
               case "countDocuments": {
                 console.info("[DBX][executeTabSql:mongo-count:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
-                const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, 0, 1, mongoCommand.filter, undefined, undefined, executionId);
-                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoCountToQueryResult(result.total, performance.now() - commandStartedAt))));
+                const total = await api.mongoCountDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, executionId);
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoCountToQueryResult(total, performance.now() - commandStartedAt))));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-count:done]", {
                   traceId,
                   collection: mongoCommand.collection,
                   database: currentDatabase,
-                  total: result.total,
+                  total,
                   elapsed: elapsed(),
                 });
                 break;

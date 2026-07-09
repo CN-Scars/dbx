@@ -252,6 +252,7 @@ pub enum MongoAgentMethod {
     ListCollections,
     FindDocuments,
     FindDocumentsExtendedJson,
+    CountDocuments,
     ServerVersion,
     CreateIndex,
     DropIndexes,
@@ -264,11 +265,12 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
         Self::FindDocumentsExtendedJson,
+        Self::CountDocuments,
         Self::ServerVersion,
         Self::CreateIndex,
         Self::DropIndexes,
@@ -286,6 +288,7 @@ impl MongoAgentMethod {
             Self::ListCollections => "list_collections",
             Self::FindDocuments => "find_documents",
             Self::FindDocumentsExtendedJson => "find_documents_extended_json",
+            Self::CountDocuments => "count_documents",
             Self::ServerVersion => "server_version",
             Self::CreateIndex => "create_index",
             Self::DropIndexes => "drop_indexes",
@@ -997,6 +1000,13 @@ impl AgentDriverClient {
         params: Value,
     ) -> Result<T, String> {
         self.call_mongo_method(MongoAgentMethod::FindDocumentsExtendedJson, params).await
+    }
+
+    pub async fn mongo_count_documents<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::CountDocuments, params).await
     }
 
     pub async fn mongo_server_version<T: DeserializeOwned + Send + 'static>(
@@ -1727,6 +1737,7 @@ mod tests {
         assert_eq!(MongoAgentMethod::ListCollections.as_str(), "list_collections");
         assert_eq!(MongoAgentMethod::FindDocuments.as_str(), "find_documents");
         assert_eq!(MongoAgentMethod::FindDocumentsExtendedJson.as_str(), "find_documents_extended_json");
+        assert_eq!(MongoAgentMethod::CountDocuments.as_str(), "count_documents");
         assert_eq!(MongoAgentMethod::ServerVersion.as_str(), "server_version");
         assert_eq!(MongoAgentMethod::CreateIndex.as_str(), "create_index");
         assert_eq!(MongoAgentMethod::DropIndexes.as_str(), "drop_indexes");

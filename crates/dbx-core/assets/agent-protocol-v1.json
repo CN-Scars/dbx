@@ -69,6 +69,7 @@
     "list_collections",
     "find_documents",
     "find_documents_extended_json",
+    "count_documents",
     "server_version",
     "create_index",
     "drop_indexes",

@@ -2009,6 +2009,10 @@ export async function documentFindDocuments(connectionId: string, database: stri
   return post("/api/document-store/find-documents", { connectionId, database, collection, skip, limit, filter, projection, sort, executionId });
 }
 
+export async function mongoCountDocuments(connectionId: string, database: string, collection: string, filter?: string, executionId?: string): Promise<number> {
+  return post("/api/mongo/count-documents", { connectionId, database, collection, filter, executionId });
+}
+
 export async function documentListGridFsFiles(connectionId: string, database: string, bucket: string, filter?: string, sort?: string): Promise<MongoGridFsFileInfo[]> {
   return post("/api/document-store/list-gridfs-files", { connectionId, database, bucket, filter, sort });
 }

@@ -429,6 +429,23 @@ public final class MongoAgent {
         return result;
     }
 
+    private static Object countDocuments(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        Document filterDoc = documentOrNull(params, "filter");
+        if (filterDoc == null) {
+            filterDoc = new Document();
+        }
+
+        Document result = c.getDatabase(database).runCommand(new Document("count", collection).append("query", filterDoc));
+        Object n = result.get("n");
+        if (n instanceof Number number) {
+            return number.longValue();
+        }
+        return 0L;
+    }
+
     private static Object serverVersion(JsonObject params) {
         MongoClient c = requireClient();
         String database = defaultString(stringOrNull(params, "database"), "admin");
@@ -846,6 +863,7 @@ public final class MongoAgent {
             case AgentProtocol.METHOD_LIST_INDEXES -> listIndexes(params);
             case AgentProtocol.MONGO_METHOD_FIND_DOCUMENTS -> findDocuments(params);
             case AgentProtocol.MONGO_METHOD_FIND_DOCUMENTS_EXTENDED_JSON -> findDocumentsExtendedJson(params);
+            case AgentProtocol.MONGO_METHOD_COUNT_DOCUMENTS -> countDocuments(params);
             case AgentProtocol.MONGO_METHOD_SERVER_VERSION -> serverVersion(params);
             case AgentProtocol.MONGO_METHOD_CREATE_INDEX -> createIndex(params);
             case AgentProtocol.MONGO_METHOD_DROP_INDEXES -> dropIndexes(params);
