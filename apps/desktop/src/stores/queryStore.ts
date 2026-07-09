@@ -2246,7 +2246,8 @@ export const useQueryStore = defineStore("query", () => {
               case "delete":
               case "createIndex":
               case "dropIndex":
-              case "dropIndexes": {
+              case "dropIndexes":
+              case "dropCollection": {
                 if (options?.mongoSafety) {
                   const safety = evaluateMongoWriteSafety(mongoCommand, options.mongoSafety);
                   if (!safety.allowed) throw new Error(safety.reason);
@@ -2270,6 +2271,9 @@ export const useQueryStore = defineStore("query", () => {
                 } else if (mongoCommand.kind === "dropIndex" || mongoCommand.kind === "dropIndexes") {
                   const result = await api.mongoDropIndexes(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.kind === "dropIndex" ? mongoCommand.index : mongoCommand.indexes, mongoCommand.kind === "dropIndex");
                   allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoDroppedIndexesToQueryResult(result.dropped_names, performance.now() - commandStartedAt), sourceStatement)));
+                } else if (mongoCommand.kind === "dropCollection") {
+                  await api.mongoDropCollection(tab.connectionId, currentDatabase, mongoCommand.collection);
+                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoWriteToQueryResult(1, performance.now() - commandStartedAt), sourceStatement)));
                 } else {
                   const result = await api.mongoDeleteDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.many);
                   allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt), sourceStatement)));
