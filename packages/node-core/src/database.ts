@@ -881,8 +881,8 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
     }
     const count = parseMongoCountDocumentsCommand(sql);
     if (count) {
-      const result = await withTimeout(mongoFindDocuments(config, count.collection, 0, 1, count.filter), resolveTimeoutMs(options));
-      return { columns: ["count"], rows: [{ count: result.total }], row_count: 1 };
+      const total = await withTimeout(mongoCountDocuments(config, count.collection, count.filter), resolveTimeoutMs(options));
+      return { columns: ["count"], rows: [{ count: total }], row_count: 1 };
     }
     const find = parseMongoFindCommand(sql);
     if (find) {
@@ -1122,6 +1122,16 @@ async function mongoFindDocuments(config: ConnectionConfig, collection: string, 
     filter,
     projection,
     sort,
+  });
+}
+
+async function mongoCountDocuments(config: ConnectionConfig, collection: string, filter: string): Promise<number> {
+  return bridgeDataRequest<number>("/data/mongo/count-documents", {
+    connection_id: config.id,
+    connection_name: config.name,
+    database: config.database || "",
+    collection,
+    filter,
   });
 }
 
