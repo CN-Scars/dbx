@@ -3040,6 +3040,7 @@ test("mongo count execution uses the dedicated count endpoint", async () => {
       database: "dbx_issue_2959",
       collection: "large_count",
       filter: "{}",
+      mode: "legacy",
       executionId: countBody.executionId,
     });
     assert.equal(typeof countBody.executionId, "string");

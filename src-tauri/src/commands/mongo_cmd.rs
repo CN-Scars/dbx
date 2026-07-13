@@ -117,6 +117,7 @@ pub async fn mongo_count_documents(
     database: String,
     collection: String,
     filter: Option<String>,
+    mode: Option<String>,
     execution_id: Option<String>,
 ) -> Result<u64, String> {
     let app = state.inner().clone();
@@ -129,6 +130,7 @@ pub async fn mongo_count_documents(
             &database,
             &collection,
             filter.as_deref(),
+            mode.as_deref(),
         ),
     )
     .await

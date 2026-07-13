@@ -69,6 +69,7 @@ struct MongoCountDocumentsRequest {
     database: Option<String>,
     collection: String,
     filter: Option<String>,
+    mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -548,6 +549,7 @@ async fn handle_mongo_count_documents_data(state: &Arc<AppState>, body: &str, st
         &database,
         &req.collection,
         req.filter.as_deref(),
+        req.mode.as_deref(),
     )
     .await
     {

@@ -226,6 +226,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
           database: config.database || "",
           collection: count.collection,
           filter: count.filter,
+          mode: count.mode,
         }),
       });
       const total = (await res.json()) as number;

@@ -438,6 +438,12 @@ public final class MongoAgent {
             filterDoc = new Document();
         }
 
+        boolean accurate = !params.has("accurate") || params.get("accurate").getAsBoolean();
+        if (accurate) {
+            return c.getDatabase(database).getCollection(collection).countDocuments(filterDoc);
+        }
+
+        // MongoDB 3.4 count() needs the legacy command to avoid the slow countDocuments path.
         Document result = c.getDatabase(database).runCommand(new Document("count", collection).append("query", filterDoc));
         Object n = result.get("n");
         if (n instanceof Number number) {

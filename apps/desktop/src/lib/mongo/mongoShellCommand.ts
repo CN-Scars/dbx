@@ -12,6 +12,7 @@ export interface MongoFindCommand {
 export interface MongoCountDocumentsCommand {
   collection: string;
   filter: string;
+  mode: "accurate" | "legacy";
 }
 
 export interface MongoAggregateCommand {
@@ -145,8 +146,6 @@ export function applyMongoFindSort(input: string, column: string, direction: "as
 
 export function parseMongoCountDocumentsCommand(input: string): MongoCountDocumentsCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
-  // Accept deprecated Mongo shell count helpers for old server workflows, but
-  // keep DBX's internal execution mapped to the countDocuments result shape.
   return parseCollectionCountCommand(source, "countDocuments") ?? parseCollectionCountCommand(source, "count") ?? parseFindCountCommand(source);
 }
 
@@ -166,6 +165,7 @@ function parseCollectionCountCommand(source: string, method: "countDocuments" | 
   return {
     collection: target.collection,
     filter,
+    mode: method === "countDocuments" ? "accurate" : "legacy",
   };
 }
 
@@ -188,6 +188,7 @@ function parseFindCountCommand(source: string): MongoCountDocumentsCommand | nul
   return {
     collection: target.collection,
     filter,
+    mode: "legacy",
   };
 }
 

@@ -370,6 +370,7 @@ async function measureDbxDedicatedCount(options, connectionId) {
     database: options.database,
     collection: options.collection,
     filter: "{}",
+    mode: "legacy",
   });
   if (!response.ok) {
     return { value: `unavailable (${response.status})`, payloadBytes: Buffer.byteLength(response.text) };

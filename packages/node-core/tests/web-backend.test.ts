@@ -144,6 +144,7 @@ test("web backend routes MongoDB count commands through count-documents", async 
         database: "app",
         collection: "projects",
         filter: '{"active":true}',
+        mode: "accurate",
       });
       return jsonResponse(42);
     }

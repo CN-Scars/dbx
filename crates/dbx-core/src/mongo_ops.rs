@@ -127,17 +127,22 @@ pub async fn mongo_count_documents_core(
     database: &str,
     collection: &str,
     filter: Option<&str>,
+    mode: Option<&str>,
 ) -> Result<u64, String> {
+    let accurate = mode != Some("legacy");
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
-        PoolKind::MongoDb(client) => mongo_driver::count_documents(client, database, collection, filter).await,
+        PoolKind::MongoDb(client) => {
+            mongo_driver::count_documents(client, database, collection, filter, accurate).await
+        }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let params = serde_json::json!({
                 "database": database,
                 "collection": collection,
                 "filter": filter,
+                "accurate": accurate,
             });
             match client.mongo_count_documents(params.clone()).await {
                 Ok(total) => Ok(total),

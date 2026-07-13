@@ -55,6 +55,7 @@ test("direct backend routes MongoDB count commands through the count bridge", as
       database: "app",
       collection: "projects",
       filter: '{ "active": true }',
+      mode: "legacy",
     });
     assert.deepEqual(result, {
       columns: ["count"],

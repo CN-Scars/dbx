@@ -252,6 +252,7 @@ test("parseMongoCountDocumentsCommand parses db collection countDocuments", () =
   assert.deepEqual(parseMongoCountDocumentsCommand("db.products.countDocuments({})"), {
     collection: "products",
     filter: "{}",
+    mode: "accurate",
   });
 });
 
@@ -259,20 +260,24 @@ test("parseMongoCountDocumentsCommand parses legacy count helpers", () => {
   assert.deepEqual(parseMongoCountDocumentsCommand("db.products.count({ active: true })"), {
     collection: "products",
     filter: '{ "active": true }',
+    mode: "legacy",
   });
   assert.deepEqual(parseMongoCountDocumentsCommand('db.getCollection("audit.logs").count()'), {
     collection: "audit.logs",
     filter: "{}",
+    mode: "legacy",
   });
   assert.deepEqual(parseMongoCountDocumentsCommand("db.products.find({ active: true }).count()"), {
     collection: "products",
     filter: '{ "active": true }',
+    mode: "legacy",
   });
   assert.equal(parseMongoFindCommand("db.products.find({ active: true }).count()"), null);
   assert.deepEqual(parseMongoCommand("db.products.find({ active: true }).count()")?.command, {
     kind: "countDocuments",
     collection: "products",
     filter: '{ "active": true }',
+    mode: "legacy",
   });
 });
 

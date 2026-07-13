@@ -597,6 +597,7 @@ pub async fn count_documents(
     database: &str,
     collection: &str,
     filter: Option<&str>,
+    accurate: bool,
 ) -> Result<u64, String> {
     let col = client.database(database).collection::<Document>(collection);
 
@@ -608,7 +609,8 @@ pub async fn count_documents(
         _ => doc! {},
     };
 
-    if filter_doc.is_empty() {
+    if !accurate && filter_doc.is_empty() {
+        // Legacy count() permits the metadata-backed fast path; countDocuments() must scan accurately.
         col.estimated_document_count().await.map_err(|e| e.to_string())
     } else {
         col.count_documents(filter_doc).await.map_err(|e| e.to_string())

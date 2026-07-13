@@ -85,6 +85,7 @@ pub struct MongoCountRequest {
     pub database: String,
     pub collection: String,
     pub filter: Option<String>,
+    pub mode: Option<String>,
     pub execution_id: Option<String>,
 }
 
@@ -309,6 +310,7 @@ pub async fn count_documents(
             &req.database,
             &req.collection,
             req.filter.as_deref(),
+            req.mode.as_deref(),
         ),
     )
     .await?;
