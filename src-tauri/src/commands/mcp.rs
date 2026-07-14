@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 const MCP_PACKAGE_NAME: &str = "@dbx-app/mcp-server";
 const MCP_LATEST_URL: &str = "https://registry.npmjs.org/@dbx-app%2fmcp-server/latest";
 const MCP_INSTALL_COMMAND: &str = "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org";
+const MCP_MIN_NODE_VERSION: NodeVersion = NodeVersion { major: 22, minor: 13, patch: 0 };
+const MCP_MIN_NODE_VERSION_REQUIREMENT: &str = ">=22.13.0";
 const SHELL_COMMAND_MARKER: &str = "__DBX_MCP_COMMAND_OUTPUT_START__";
 
 #[derive(Debug, Serialize)]
@@ -51,6 +53,9 @@ struct NodeRuntime {
 impl NodeRuntime {
     fn probe(candidate: NodeRuntimeCandidate) -> Option<Self> {
         let (node_path, node_version) = resolve_node_identity(&candidate.node_path)?;
+        if !is_mcp_compatible_node_version(&node_version) {
+            return None;
+        }
         let npm_cli_path = find_npm_cli(&node_path)?;
 
         let npm_root = npm_stdout(&node_path, &npm_cli_path, &["root", "-g"]).ok()?;
@@ -80,6 +85,13 @@ impl NodeRuntime {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct NodeVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
 #[tauri::command]
 pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
     let local_status = tauri::async_runtime::spawn_blocking(|| {
@@ -105,8 +117,11 @@ pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
         .as_deref()
         .zip(latest_version.as_deref())
         .is_some_and(|(current, latest)| dbx_core::update::is_newer_version(latest, current));
-    let error =
-        if npm_available { None } else { Some("Unable to resolve a compatible Node.js and npm runtime.".to_string()) };
+    let error = if npm_available {
+        None
+    } else {
+        Some(format!("Unable to resolve a compatible Node.js ({}) and npm runtime.", MCP_MIN_NODE_VERSION_REQUIREMENT))
+    };
 
     Ok(McpServerStatus {
         installed: current_version.is_some() || bin_path.is_some() || script_path.is_some(),
@@ -128,8 +143,10 @@ pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
 pub async fn install_mcp_server() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let runtime = resolve_node_runtime().ok_or_else(|| {
-            "Unable to resolve a compatible Node.js and npm runtime. Install Node.js with npm and try again."
-                .to_string()
+            format!(
+                "Unable to resolve a compatible Node.js ({}) and npm runtime. Install Node.js with npm and try again.",
+                MCP_MIN_NODE_VERSION_REQUIREMENT
+            )
         })?;
         let output = runtime.npm_output(&[
             "install",
@@ -236,6 +253,9 @@ fn probe_runtime_candidate(
 }
 
 fn prefer_runtime(runtime: NodeRuntime, fallback: &mut Option<NodeRuntime>) -> Option<NodeRuntime> {
+    if !is_mcp_compatible_node_version(&runtime.node_version) {
+        return None;
+    }
     if runtime.has_mcp_package() {
         return Some(runtime);
     }
@@ -243,6 +263,25 @@ fn prefer_runtime(runtime: NodeRuntime, fallback: &mut Option<NodeRuntime>) -> O
         *fallback = Some(runtime);
     }
     None
+}
+
+fn is_mcp_compatible_node_version(version: &str) -> bool {
+    parse_node_version(version).is_some_and(|version| version >= MCP_MIN_NODE_VERSION)
+}
+
+fn parse_node_version(version: &str) -> Option<NodeVersion> {
+    let version = version.trim().trim_start_matches('v');
+    let mut parts = version.split('.');
+    Some(NodeVersion {
+        major: parse_node_version_part(parts.next()?)?,
+        minor: parse_node_version_part(parts.next()?)?,
+        patch: parse_node_version_part(parts.next()?)?,
+    })
+}
+
+fn parse_node_version_part(value: &str) -> Option<u64> {
+    let digits = value.chars().take_while(char::is_ascii_digit).collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
 fn current_path_node_candidate() -> Option<NodeRuntimeCandidate> {
@@ -748,19 +787,29 @@ mod tests {
     #[cfg(not(windows))]
     use super::{bash_login_script, canonical_runtime_path, NodeRuntimeCandidate};
     use super::{
-        mcp_command_for_runtime, normalized_reported_path, npm_cli_candidates, prefer_runtime, prefixed_output_path,
-        stdout_after_shell_marker, NodeRuntime, SHELL_COMMAND_MARKER,
+        is_mcp_compatible_node_version, mcp_command_for_runtime, normalized_reported_path, npm_cli_candidates,
+        parse_node_version, prefer_runtime, prefixed_output_path, stdout_after_shell_marker, NodeRuntime, NodeVersion,
+        SHELL_COMMAND_MARKER,
     };
     #[cfg(not(windows))]
     use super::{shell_command_script, shell_quote};
     use std::path::PathBuf;
 
     fn runtime(node_path: &str, script_path: Option<&str>) -> NodeRuntime {
+        runtime_with_version_and_root(node_path, &format!("{node_path}-root"), script_path, "v24.16.0")
+    }
+
+    fn runtime_with_version_and_root(
+        node_path: &str,
+        npm_root: &str,
+        script_path: Option<&str>,
+        node_version: &str,
+    ) -> NodeRuntime {
         NodeRuntime {
             node_path: PathBuf::from(node_path),
             npm_cli_path: PathBuf::from(format!("{node_path}-npm-cli.js")),
-            npm_root: PathBuf::from(format!("{node_path}-root")),
-            node_version: "v24.16.0".to_string(),
+            npm_root: PathBuf::from(npm_root),
+            node_version: node_version.to_string(),
             mcp_version: script_path.map(|_| "0.4.29".to_string()),
             mcp_script_path: script_path.map(PathBuf::from),
             mcp_bin_path: None,
@@ -829,6 +878,34 @@ mod tests {
         assert_eq!(fallback.unwrap().node_path, first.node_path);
         assert_eq!(selected.node_path, installed.node_path);
         assert_eq!(selected.mcp_script_path, installed.mcp_script_path);
+    }
+
+    #[test]
+    fn incompatible_runtime_cannot_win_with_shared_mcp_package() {
+        let shared_npm_root = "/runtime/shared/node_modules";
+        let shared_script = "/runtime/shared/node_modules/@dbx-app/mcp-server/dist/index.js";
+        let old_runtime =
+            runtime_with_version_and_root("/runtime/node-20", shared_npm_root, Some(shared_script), "v20.18.1");
+        let compatible_runtime =
+            runtime_with_version_and_root("/runtime/node-22", shared_npm_root, Some(shared_script), "v22.13.0");
+        let mut fallback = None;
+
+        assert!(prefer_runtime(old_runtime, &mut fallback).is_none());
+        assert!(fallback.is_none());
+        let selected = prefer_runtime(compatible_runtime.clone(), &mut fallback).unwrap();
+
+        assert_eq!(selected.node_path, compatible_runtime.node_path);
+        assert_eq!(selected.mcp_script_path, compatible_runtime.mcp_script_path);
+    }
+
+    #[test]
+    fn node_version_parser_enforces_mcp_minimum() {
+        assert_eq!(parse_node_version("v22.13.0"), Some(NodeVersion { major: 22, minor: 13, patch: 0 }));
+        assert_eq!(parse_node_version("22.13.0-nightly"), Some(NodeVersion { major: 22, minor: 13, patch: 0 }));
+        assert!(!is_mcp_compatible_node_version("v22.12.9"));
+        assert!(!is_mcp_compatible_node_version("v21.99.99"));
+        assert!(is_mcp_compatible_node_version("v22.13.0"));
+        assert!(is_mcp_compatible_node_version("v24.0.0"));
     }
 
     #[test]
