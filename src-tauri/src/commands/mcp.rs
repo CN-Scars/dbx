@@ -327,7 +327,8 @@ fn command_file_names(command: &str) -> Vec<OsString> {
             }
         }
     }
-    let mut names = extensions.into_iter().map(|extension| OsString::from(format!("{command}{extension}"))).collect();
+    let mut names: Vec<OsString> =
+        extensions.into_iter().map(|extension| OsString::from(format!("{command}{extension}"))).collect();
     names.push(OsString::from(command));
     names
 }
