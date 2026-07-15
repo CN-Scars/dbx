@@ -206,16 +206,23 @@ pub(crate) async fn resolve_mcp_server_command() -> Option<(String, Vec<String>)
 }
 
 fn resolve_mcp_server_command_sync() -> Option<(String, Vec<String>)> {
-    if let Some(command) = resolve_node_runtime().and_then(|runtime| mcp_command_for_runtime(&runtime)) {
+    let runtime = resolve_node_runtime();
+    resolve_managed_mcp_command(runtime.as_ref(), locate_mcp_bin)
+}
+
+fn resolve_managed_mcp_command(
+    runtime: Option<&NodeRuntime>,
+    locate_path_shim: impl FnOnce() -> Option<PathBuf>,
+) -> Option<(String, Vec<String>)> {
+    if let Some(command) = runtime.and_then(mcp_command_for_runtime) {
         return Some(command);
     }
 
-    let fallback = locate_mcp_bin()?;
-    log::warn!(
-        "Falling back to the MCP package shim at {}; no coherent Node.js runtime and package entry could be resolved",
-        fallback.display()
-    );
-    Some((path_string(&fallback), Vec::new()))
+    // PATH shims may use `#!/usr/bin/env node`, bypassing the runtime compatibility check above.
+    if let Some(shim) = locate_path_shim() {
+        log::warn!("Ignoring unbound MCP package shim at {}", shim.display());
+    }
+    None
 }
 
 fn resolve_node_runtime() -> Option<NodeRuntime> {
@@ -529,6 +536,9 @@ fn mcp_bin_path(npm_prefix: &Path) -> Option<PathBuf> {
 }
 
 fn mcp_command_for_runtime(runtime: &NodeRuntime) -> Option<(String, Vec<String>)> {
+    if !is_mcp_compatible_node_version(&runtime.node_version) {
+        return None;
+    }
     let script_path = runtime.mcp_script_path.as_ref()?;
     Some((path_string(&runtime.node_path), vec![path_string(script_path)]))
 }
@@ -789,8 +799,8 @@ mod tests {
     use super::{bash_login_script, canonical_runtime_path, NodeRuntimeCandidate};
     use super::{
         is_mcp_compatible_node_version, mcp_command_for_runtime, normalized_reported_path, npm_cli_candidates,
-        parse_node_version, prefer_runtime, prefixed_output_path, stdout_after_shell_marker, NodeRuntime, NodeVersion,
-        SHELL_COMMAND_MARKER,
+        parse_node_version, prefer_runtime, prefixed_output_path, resolve_managed_mcp_command,
+        stdout_after_shell_marker, NodeRuntime, NodeVersion, SHELL_COMMAND_MARKER,
     };
     #[cfg(not(windows))]
     use super::{shell_command_script, shell_quote};
@@ -917,6 +927,21 @@ mod tests {
 
         assert_eq!(command.0, "/runtime/node-24");
         assert_eq!(command.1, vec!["/runtime/node-24-mcp/dist/index.js"]);
+    }
+
+    #[test]
+    fn incompatible_runtime_does_not_fall_back_to_available_mcp_shim() {
+        let incompatible = runtime_with_version_and_root(
+            "/runtime/node-20",
+            "/runtime/node-20-root",
+            Some("/runtime/node-20-root/bin/dbx-mcp-server"),
+            "v20.18.1",
+        );
+
+        let command =
+            resolve_managed_mcp_command(Some(&incompatible), || Some(PathBuf::from("/path/bin/dbx-mcp-server")));
+
+        assert!(command.is_none());
     }
 
     #[test]
