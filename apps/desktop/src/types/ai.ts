@@ -1,4 +1,4 @@
-export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "codex-cli" | "custom";
+export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "claude-code-cli" | "codex-cli" | "custom";
 export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
 export type AiAuthMethod = "api-key" | "bearer";
 export type AiReasoningLevel = "default" | "minimal" | "low" | "medium" | "high";
@@ -18,6 +18,8 @@ export interface AiConfig {
   contextWindow?: number;
   codexCliPath?: string | null;
   codexCliEnv?: Record<string, string>;
+  claudeCodeCliPath?: string | null;
+  claudeCodeCliEnv?: Record<string, string>;
 }
 
 export interface AiTestConnectionResult {

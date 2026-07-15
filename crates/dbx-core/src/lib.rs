@@ -9,6 +9,7 @@ pub mod agent_runtime;
 pub mod agent_service;
 pub mod agent_tools;
 pub mod ai;
+pub mod ai_claude_code_cli;
 pub mod ai_cli_agent;
 pub mod ai_codex_cli;
 pub mod changelog;

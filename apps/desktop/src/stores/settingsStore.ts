@@ -164,6 +164,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: true,
   },
+  "claude-code-cli": {
+    label: "Claude Code CLI",
+    iconSlug: "claudecode",
+    provider: "claude-code-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "codex-cli": {
     label: "Codex CLI",
     iconSlug: "codex",
@@ -226,6 +236,8 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     contextWindow: config?.contextWindow ?? undefined,
     codexCliPath: config?.codexCliPath?.trim() || undefined,
     codexCliEnv: normalizeAiEnv(config?.codexCliEnv),
+    claudeCodeCliPath: config?.claudeCodeCliPath?.trim() || undefined,
+    claudeCodeCliEnv: normalizeAiEnv(config?.claudeCodeCliEnv),
   };
 }
 
@@ -1013,7 +1025,7 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli") return true;
+    if (config.provider === "codex-cli" || config.provider === "claude-code-cli") return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 

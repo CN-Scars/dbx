@@ -232,7 +232,7 @@ const configuredProviders = computed(() => {
   const providers = settings.aiConfigs.filter((c) => {
     // Check directly if config has required fields
     const preset = AI_PROVIDER_PRESETS[c.provider];
-    if (c.provider === "codex-cli") return true;
+    if (c.provider === "codex-cli" || c.provider === "claude-code-cli") return true;
     return !!c.endpoint?.trim() && !!c.model?.trim() && (!preset.requiresApiKey || !!c.apiKey?.trim());
   });
   // Apply search filter - hide providers with no matching models
