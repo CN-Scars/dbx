@@ -15,9 +15,35 @@ use tokio::sync::Notify;
 
 const DEFAULT_CLAUDE_CODE_MODELS: &[&str] = &["default", "sonnet", "opus", "fable"];
 const CLAUDE_CODE_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+const CLAUDE_CODE_SETTING_SOURCES: &str = "user";
 
 pub type ClaudeCodeRunOptions = CliAgentRunOptions;
 pub type ClaudeCodeCommandSpec = CliAgentCommandSpec;
+
+struct ClaudeCodeIsolatedCwd {
+    path: PathBuf,
+}
+
+impl ClaudeCodeIsolatedCwd {
+    fn create() -> Result<Self, String> {
+        let path = env::temp_dir().join(format!("dbx-claude-code-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).map_err(|error| {
+            format!("[claudeCodeRunFailed] Failed to create isolated Claude Code directory: {error}")
+        })?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for ClaudeCodeIsolatedCwd {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn append_claude_code_isolation_args(args: &mut Vec<String>) {
+    // User settings retain authentication and preferences without loading project hooks or local overrides.
+    args.extend(["--setting-sources".to_string(), CLAUDE_CODE_SETTING_SOURCES.to_string()]);
+}
 
 fn claude_code_program(config: &AiConfig) -> String {
     config
@@ -231,8 +257,9 @@ pub fn build_claude_code_command(
         "--mcp-config".to_string(),
         claude_code_mcp_config(options),
         "--strict-mcp-config".to_string(),
-        "--tools".to_string(),
     ];
+    append_claude_code_isolation_args(&mut args);
+    args.push("--tools".to_string());
     args.extend(enabled_tools.iter().cloned());
     args.push("--allowedTools".to_string());
     args.extend(enabled_tools);
@@ -264,7 +291,7 @@ pub async fn list_claude_code_models(config: &AiConfig) -> Result<Vec<AiModelInf
 }
 
 async fn discover_claude_code_models(config: &AiConfig, program: String) -> Option<Vec<AiModelInfo>> {
-    let command = ClaudeCodeCommandSpec {
+    let mut command = ClaudeCodeCommandSpec {
         program,
         args: vec![
             "--print".to_string(),
@@ -275,12 +302,15 @@ async fn discover_claude_code_models(config: &AiConfig, program: String) -> Opti
             "--verbose".to_string(),
         ],
     };
+    append_claude_code_isolation_args(&mut command.args);
     let env = claude_code_process_env(config, &command).ok()?;
+    let isolated_cwd = ClaudeCodeIsolatedCwd::create().ok()?;
     let mut process = cli_command(&command.program);
     process
         .args(command.args.iter().map(String::as_str))
         .envs(env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
         .env_remove("CLAUDECODE")
+        .current_dir(&isolated_cwd.path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -455,10 +485,12 @@ pub async fn run_claude_code_agent(
     let mut command = build_claude_code_command(config, prompt, &options);
     command.program = program;
     let env = claude_code_process_env(config, &command)?;
-    run_cli_jsonl_agent(
+    let isolated_cwd = ClaudeCodeIsolatedCwd::create()?;
+    let result = run_cli_jsonl_agent(
         CliAgentProcessSpec {
             command,
             env,
+            current_dir: Some(isolated_cwd.path.clone()),
             stdin: Some(prompt.to_string()),
             dialect: CliAgentJsonlDialect::ClaudeCodePrint,
             classify_spawn_error: classify_claude_code_spawn_error,
@@ -467,7 +499,8 @@ pub async fn run_claude_code_agent(
         cancelled,
         on_event,
     )
-    .await
+    .await;
+    result
 }
 
 #[cfg(test)]
@@ -476,9 +509,15 @@ mod tests {
         build_claude_code_command, claude_code_cli_env, claude_code_enabled_tools, parse_claude_code_jsonl_event,
         parse_claude_code_models, validate_claude_code_program, ClaudeCodeRunOptions, DEFAULT_CLAUDE_CODE_MODELS,
     };
+    #[cfg(unix)]
+    use super::{list_claude_code_models, run_claude_code_agent};
     use crate::agent_events::AgentEvent;
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiEffortLevel, AiModelInfo, AiProvider, AiReasoningLevel};
     use crate::ai_cli_agent::{model_infos, CliAgentCommandSpec};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use tokio::sync::Notify;
 
     fn claude_code_config(model: &str) -> AiConfig {
         AiConfig {
@@ -513,6 +552,83 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn isolated_cli_test_config() -> (AiConfig, std::path::PathBuf, std::path::PathBuf) {
+        let project_dir = std::env::temp_dir().join(format!("dbx-claude-project-test-{}", uuid::Uuid::new_v4()));
+        let claude_dir = project_dir.join(".claude");
+        let user_config_dir = project_dir.join("user-config");
+        let hook_marker = project_dir.join("project-hook-loaded");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::create_dir_all(&user_config_dir).unwrap();
+        std::fs::write(user_config_dir.join("auth-marker"), "authenticated").unwrap();
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "model": "project-model-must-not-load",
+                "hooks": {
+                    "SessionStart": [{
+                        "matcher": "",
+                        "hooks": [{
+                            "type": "command",
+                            "command": format!("printf loaded > {}", hook_marker.display())
+                        }]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let executable = project_dir.join("claude");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+user_settings=false
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "--setting-sources" ] && [ "$arg" = "user" ]; then
+    user_settings=true
+  fi
+  previous="$arg"
+done
+if [ "$user_settings" != "true" ] || [ "$PWD" = "$DBX_TEST_PROJECT_DIR" ]; then
+  printf loaded > "$DBX_TEST_HOOK_MARKER"
+fi
+if [ ! -f "$CLAUDE_CONFIG_DIR/auth-marker" ]; then
+  exit 9
+fi
+input=$(cat)
+case " $* " in
+  *" --input-format stream-json "*)
+    printf '%s\n' '{"type":"control_response","response":{"response":{"models":[{"value":"claude-user-model","displayName":"User Model"}]}}}'
+    ;;
+  *)
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"isolated execution"}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success"}'
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let mut config = claude_code_config("default");
+        config.claude_code_cli_path = Some(executable.to_string_lossy().to_string());
+        config
+            .claude_code_cli_env
+            .insert("CLAUDE_CONFIG_DIR".to_string(), user_config_dir.to_string_lossy().to_string());
+        config
+            .claude_code_cli_env
+            .insert("DBX_TEST_PROJECT_DIR".to_string(), project_dir.to_string_lossy().to_string());
+        config
+            .claude_code_cli_env
+            .insert("DBX_TEST_HOOK_MARKER".to_string(), hook_marker.to_string_lossy().to_string());
+
+        (config, project_dir, hook_marker)
+    }
+
     #[test]
     fn builds_claude_code_command_with_scoped_mcp_and_default_model() {
         let spec = build_claude_code_command(&claude_code_config("default"), "hello", &run_options());
@@ -521,6 +637,11 @@ mod tests {
         assert!(spec.args.contains(&"--print".to_string()));
         assert!(spec.args.contains(&"stream-json".to_string()));
         assert!(spec.args.contains(&"--mcp-config".to_string()));
+        assert!(spec.args.windows(2).any(|args| args == ["--setting-sources", "user"]));
+        assert!(
+            spec.args.iter().position(|arg| arg == "--setting-sources")
+                < spec.args.iter().position(|arg| arg == "--tools")
+        );
         assert!(!spec.args.contains(&"hello".to_string()));
         assert!(!spec.args.contains(&"--model".to_string()));
         assert!(!spec.args.contains(&"--effort".to_string()));
@@ -528,6 +649,30 @@ mod tests {
         assert!(spec.args.iter().any(|arg| arg.contains("\"DBX_MCP_ALLOW_WRITES\":\"0\"")));
         assert!(spec.args.iter().any(|arg| arg.contains("\"DBX_MCP_SCOPE_CONNECTION_ID\":\"conn-1\"")));
         assert!(spec.args.iter().any(|arg| arg.contains("mcp__dbx__dbx_execute_query")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn model_discovery_uses_user_settings_from_an_isolated_directory() {
+        let (config, project_dir, hook_marker) = isolated_cli_test_config();
+
+        let models = list_claude_code_models(&config).await.unwrap();
+
+        assert!(models.iter().any(|model| model.id == "claude-user-model"));
+        assert!(!hook_marker.exists());
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execution_uses_user_settings_from_an_isolated_directory() {
+        let (config, project_dir, hook_marker) = isolated_cli_test_config();
+
+        let output = run_claude_code_agent(&config, "hello", run_options(), &Notify::new(), |_| {}).await.unwrap();
+
+        assert_eq!(output, "isolated execution");
+        assert!(!hook_marker.exists());
+        let _ = std::fs::remove_dir_all(project_dir);
     }
 
     #[test]

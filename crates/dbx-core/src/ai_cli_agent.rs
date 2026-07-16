@@ -3,6 +3,7 @@ use crate::ai::{AiMessage, AiModelInfo};
 use crate::token_usage::TokenUsage;
 use serde_json::Value;
 use std::ffi::OsStr;
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -34,6 +35,7 @@ pub enum CliAgentJsonlDialect {
 pub struct CliAgentProcessSpec {
     pub command: CliAgentCommandSpec,
     pub env: Vec<(String, String)>,
+    pub current_dir: Option<PathBuf>,
     pub stdin: Option<String>,
     pub dialect: CliAgentJsonlDialect,
     pub classify_spawn_error: fn(&str) -> String,
@@ -496,9 +498,11 @@ pub async fn run_cli_jsonl_agent(
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
 ) -> Result<String, String> {
     let mut command = cli_command(&spec.command.program);
+    command.args(&spec.command.args).envs(spec.env.iter().map(|(key, value)| (key.as_str(), value.as_str())));
+    if let Some(current_dir) = &spec.current_dir {
+        command.current_dir(current_dir);
+    }
     let mut child = command
-        .args(&spec.command.args)
-        .envs(spec.env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
         .stdin(if spec.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -615,6 +619,7 @@ mod tests {
                 ],
             },
             env: vec![("DBX_TEST_ENV".to_string(), "from-env".to_string())],
+            current_dir: None,
             stdin: None,
             dialect: CliAgentJsonlDialect::CodexExec,
             classify_spawn_error,
@@ -637,6 +642,7 @@ mod tests {
                 ],
             },
             env: Vec::new(),
+            current_dir: None,
             stdin: Some("prompt from stdin".to_string()),
             dialect: CliAgentJsonlDialect::CodexExec,
             classify_spawn_error,
@@ -663,6 +669,7 @@ mod tests {
         let spec = CliAgentProcessSpec {
             command: CliAgentCommandSpec { program: "sh".to_string(), args: vec!["-c".to_string(), script] },
             env: Vec::new(),
+            current_dir: None,
             stdin: None,
             dialect: CliAgentJsonlDialect::CodexExec,
             classify_spawn_error,

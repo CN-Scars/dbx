@@ -568,6 +568,7 @@ pub async fn run_codex_agent(
         CliAgentProcessSpec {
             command,
             env,
+            current_dir: None,
             stdin: Some(prompt.to_string()),
             dialect: CliAgentJsonlDialect::CodexExec,
             classify_spawn_error: classify_codex_spawn_error,
