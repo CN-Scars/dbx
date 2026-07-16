@@ -427,9 +427,27 @@ test("normalizes legacy AI config and fills provider defaults", () => {
     provider: "claude-code-cli",
     claudeCodeCliPath: " /opt/homebrew/bin/claude ",
     claudeCodeCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+    reasoningLevel: "xhigh",
+    models: [
+      {
+        name: "claude-sonnet-4-6",
+        label: "Sonnet 4.6",
+        supportedEffortLevels: ["low", "high", "xhigh"],
+      },
+    ],
   } as any);
   assert.equal(claudeCode.claudeCodeCliPath, "/opt/homebrew/bin/claude");
   assert.deepEqual(claudeCode.claudeCodeCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(claudeCode.reasoningLevel, "xhigh");
+  assert.deepEqual(claudeCode.models, [
+    {
+      name: "claude-sonnet-4-6",
+      label: "Sonnet 4.6",
+      supportedEffortLevels: ["low", "high", "xhigh"],
+    },
+  ]);
+  assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "max" } as any).reasoningLevel, "max");
+  assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "future" } as any).reasoningLevel, "default");
 });
 
 test("infers legacy AI provider from saved endpoint and model", () => {

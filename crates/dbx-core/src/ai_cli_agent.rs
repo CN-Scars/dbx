@@ -110,7 +110,7 @@ pub fn build_cli_agent_prompt(
 }
 
 pub fn model_infos(ids: &[&str]) -> Vec<AiModelInfo> {
-    ids.iter().map(|id| AiModelInfo { id: (*id).to_string(), display_name: None }).collect()
+    ids.iter().map(|id| AiModelInfo::new(*id, None)).collect()
 }
 
 pub fn cli_command(program: impl AsRef<OsStr>) -> Command {
@@ -144,8 +144,8 @@ pub async fn list_json_models_or_default(
     if models.is_empty() {
         Ok(model_infos(default_models))
     } else {
-        let mut result = vec![AiModelInfo { id: "default".to_string(), display_name: None }];
-        result.extend(models.into_iter().map(|id| AiModelInfo { id, display_name: None }));
+        let mut result = vec![AiModelInfo::new("default", None)];
+        result.extend(models.into_iter().map(|id| AiModelInfo::new(id, None)));
         Ok(result)
     }
 }

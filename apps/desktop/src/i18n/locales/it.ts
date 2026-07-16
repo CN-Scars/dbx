@@ -1426,7 +1426,11 @@ export default withEnglishFallback({
     reasoningLevelLow: "Basso",
     reasoningLevelMedium: "Medio",
     reasoningLevelHigh: "Alto",
+    reasoningLevelXhigh: "Molto alto",
+    reasoningLevelMax: "Massimo",
     reasoningLevelHint: "Controlla model_reasoning_effort di Codex CLI. Predefinito usa la configurazione Codex.",
+    claudeCodeEffortHint: "I livelli disponibili vengono forniti dinamicamente dal Claude Code CLI locale per il modello selezionato.",
+    claudeCodeEffortUnavailable: "Il modello selezionato non segnala livelli di effort configurabili. Claude Code userà il valore predefinito.",
     actions: {
       general: "Generale",
       generate: "Genera SQL",

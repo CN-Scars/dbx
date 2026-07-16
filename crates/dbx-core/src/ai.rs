@@ -110,6 +110,8 @@ pub enum AiReasoningLevel {
     Low,
     Medium,
     High,
+    Xhigh,
+    Max,
 }
 
 impl AiReasoningLevel {
@@ -120,6 +122,43 @@ impl AiReasoningLevel {
             AiReasoningLevel::Low => Some("low"),
             AiReasoningLevel::Medium => Some("medium"),
             AiReasoningLevel::High => Some("high"),
+            AiReasoningLevel::Xhigh | AiReasoningLevel::Max => None,
+        }
+    }
+
+    pub fn as_claude_code_effort(&self) -> Option<&'static str> {
+        match self {
+            AiReasoningLevel::Default | AiReasoningLevel::Minimal => None,
+            AiReasoningLevel::Low => Some("low"),
+            AiReasoningLevel::Medium => Some("medium"),
+            AiReasoningLevel::High => Some("high"),
+            AiReasoningLevel::Xhigh => Some("xhigh"),
+            AiReasoningLevel::Max => Some("max"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum AiEffortLevel {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl std::str::FromStr for AiEffortLevel {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            _ => Err(()),
         }
     }
 }
@@ -147,6 +186,8 @@ pub struct AiModelListItem {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_effort_levels: Vec<AiEffortLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +321,14 @@ pub struct AiModelInfo {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_effort_levels: Vec<AiEffortLevel>,
+}
+
+impl AiModelInfo {
+    pub fn new(id: impl Into<String>, display_name: Option<String>) -> Self {
+        Self { id: id.into(), display_name, supported_effort_levels: Vec::new() }
+    }
 }
 
 /// Result of an AI connection test (mirrors CC-Switch's StreamCheckResult).
@@ -861,7 +910,7 @@ fn parse_model_list_response(data: &serde_json::Value) -> Result<Vec<AiModelInfo
             .filter(|name| !name.trim().is_empty() && *name != id)
             .map(ToString::to_string);
 
-        models.push(AiModelInfo { id: id.to_string(), display_name });
+        models.push(AiModelInfo::new(id, display_name));
     }
 
     Ok(models)
@@ -2961,11 +3010,8 @@ mod tests {
         assert_eq!(
             parse_model_list_response(&data).unwrap(),
             vec![
-                AiModelInfo { id: "gpt-4o-mini".to_string(), display_name: None },
-                AiModelInfo {
-                    id: "claude-sonnet-4-20250514".to_string(),
-                    display_name: Some("Claude Sonnet 4".to_string())
-                },
+                AiModelInfo::new("gpt-4o-mini", None),
+                AiModelInfo::new("claude-sonnet-4-20250514", Some("Claude Sonnet 4".to_string())),
             ]
         );
     }

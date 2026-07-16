@@ -54,6 +54,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext } from "@/lib/ai/ai";
+import { normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
@@ -250,7 +251,15 @@ const activeFullConfig = computed(() => {
   if (!settings.activeModel) return null;
   const item = settings.aiConfigs.find((c) => c.id === settings.activeModel!.configId);
   if (!item) return null;
-  return normalizeAiConfig({ ...item, model: settings.activeModel!.modelId });
+  const modelId = settings.activeModel.modelId;
+  const config = normalizeAiConfig({ ...item, model: modelId });
+  if (config.provider === "claude-code-cli") {
+    config.reasoningLevel = normalizeClaudeCodeReasoningLevel(
+      config.reasoningLevel,
+      item.models?.find((model) => model.name === modelId),
+    );
+  }
+  return config;
 });
 
 function getModelsForConfig(configId: string): string[] {

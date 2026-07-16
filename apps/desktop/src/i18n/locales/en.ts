@@ -1486,7 +1486,11 @@ export default {
     reasoningLevelLow: "Low",
     reasoningLevelMedium: "Medium",
     reasoningLevelHigh: "High",
+    reasoningLevelXhigh: "Extra high",
+    reasoningLevelMax: "Maximum",
     reasoningLevelHint: "Controls Codex CLI model_reasoning_effort. Default uses your Codex config.",
+    claudeCodeEffortHint: "Available levels are reported by the selected model through your local Claude Code CLI.",
+    claudeCodeEffortUnavailable: "The selected model does not report configurable effort levels. Claude Code will use its default.",
     actions: {
       general: "General",
       generate: "Generate SQL",

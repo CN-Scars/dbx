@@ -32,6 +32,8 @@ import {
   type AiProvider,
   type AiApiStyle,
   type AiAuthMethod,
+  type AiConfiguredModel,
+  type AiEffortLevel,
   type AiReasoningLevel,
   type EditorTheme,
   type DesktopIconTheme,
@@ -44,6 +46,7 @@ import {
   type CustomTheme,
 } from "@/stores/settingsStore";
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { normalizeAiModelEffortLevels, normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
 import DangerConfirmDialog from "./DangerConfirmDialog.vue";
@@ -74,6 +77,7 @@ import {
   webdavSyncTest,
   webdavSyncUpload,
   type AppSupportInfo,
+  type AiModelInfo,
   type McpServerStatus,
   type SnippetProvider,
   type SnippetSyncConfig,
@@ -1923,14 +1927,14 @@ const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 
 // Model list management
-const aiEditModels = ref<Array<{ name: string; label?: string }>>([]);
+const aiEditModels = ref<AiConfiguredModel[]>([]);
 const aiModelListLoading = ref(false);
 let aiModelListRequestToken = 0;
 
 // AI Model Multi-Select
 const aiModelMultiSelectOpen = ref(false);
 const aiModelMultiSelectSearch = ref("");
-const aiFetchedModels = ref<Array<{ id: string; displayName?: string }>>([]);
+const aiFetchedModels = ref<AiModelInfo[]>([]);
 
 const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli"]);
 const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
@@ -1956,13 +1960,20 @@ const aiModelError = ref("");
 
 const aiCompletionsMode = computed(() => aiEditApiStyle.value === "completions");
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
-const aiReasoningLevelOptions: Array<{ value: AiReasoningLevel; labelKey: string }> = [
+const codexReasoningLevelOptions: Array<{ value: AiReasoningLevel; labelKey: string }> = [
   { value: "default", labelKey: "ai.reasoningLevelDefault" },
   { value: "minimal", labelKey: "ai.reasoningLevelMinimal" },
   { value: "low", labelKey: "ai.reasoningLevelLow" },
   { value: "medium", labelKey: "ai.reasoningLevelMedium" },
   { value: "high", labelKey: "ai.reasoningLevelHigh" },
 ];
+const effortLevelLabelKeys: Record<AiEffortLevel, string> = {
+  low: "ai.reasoningLevelLow",
+  medium: "ai.reasoningLevelMedium",
+  high: "ai.reasoningLevelHigh",
+  xhigh: "ai.reasoningLevelXhigh",
+  max: "ai.reasoningLevelMax",
+};
 
 const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
@@ -2073,6 +2084,7 @@ function removeCliEnvRow(id: string) {
 }
 
 function currentAiEditConfig() {
+  const reasoningLevel = aiIsClaudeCodeCli.value ? normalizeClaudeCodeReasoningLevel(aiEditReasoningLevel.value, aiSelectedModelInfo.value) : aiEditReasoningLevel.value;
   return {
     provider: aiEditProvider.value,
     apiKey: aiEditApiKey.value,
@@ -2083,7 +2095,7 @@ function currentAiEditConfig() {
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
-    reasoningLevel: aiEditReasoningLevel.value,
+    reasoningLevel,
     contextWindow: aiEditContextWindow.value || undefined,
     codexCliPath: aiEditCodexCliPath.value.trim() || undefined,
     codexCliEnv: aiIsCodexCli.value ? cliEnvFromRows(aiEditCodexCliEnvRows.value) : {},
@@ -2111,9 +2123,14 @@ function aiSelectProvider(provider: AiProvider) {
   aiEditEndpoint.value = preset.endpoint;
   aiEditModel.value = preset.model;
   aiEditApiStyle.value = preset.apiStyle;
+  aiEditReasoningLevel.value = "default";
   aiEditModels.value = [];
   aiFetchedModels.value = [];
+  aiLastModelFetchSignature = "";
+  aiModelListRequestToken += 1;
+  aiModelListLoading.value = false;
   if (CLI_AI_PROVIDERS.has(provider)) void ensureCliMcpStatus();
+  if (provider === "claude-code-cli") void aiFetchModelList();
 }
 
 function aiSelectApiStyle(style: AiApiStyle) {
@@ -2151,7 +2168,7 @@ function aiEnterEditMode(configId?: string) {
       aiEditCodexCliEnvRows.value = aiEnvRowsFromConfig(config.codexCliEnv);
       aiEditClaudeCodeCliPath.value = config.claudeCodeCliPath ?? "";
       aiEditClaudeCodeCliEnvRows.value = aiEnvRowsFromConfig(config.claudeCodeCliEnv);
-      aiEditModels.value = config.models ? [...config.models] : [];
+      aiEditModels.value = config.models ? config.models.map((model) => ({ ...model, supportedEffortLevels: model.supportedEffortLevels ? [...model.supportedEffortLevels] : undefined })) : [];
     }
   } else {
     aiEditConfigName.value = "";
@@ -2172,6 +2189,9 @@ function aiEnterEditMode(configId?: string) {
     aiEditClaudeCodeCliPath.value = "";
     aiEditClaudeCodeCliEnvRows.value = [];
   }
+  aiFetchedModels.value = [];
+  aiLastModelFetchSignature = "";
+  if (aiIsClaudeCodeCli.value) void aiFetchModelList();
 }
 
 function aiAddModel() {
@@ -2186,6 +2206,7 @@ async function aiFetchModelList() {
   if (aiModelListLoading.value) return;
   if (!aiCanListModels.value) return;
   const token = ++aiModelListRequestToken;
+  const signature = aiModelFetchSignature.value;
   aiModelListLoading.value = true;
   aiModelError.value = "";
   try {
@@ -2207,15 +2228,21 @@ async function aiFetchModelList() {
       claudeCodeCliEnv: cliEnvFromRows(aiEditClaudeCodeCliEnvRows.value),
     });
     if (token !== aiModelListRequestToken) return;
-    const seen = new Set<string>();
-    aiFetchedModels.value = models
-      .filter((m: any) => {
-        const id = m.id?.trim();
-        if (!id || seen.has(id)) return false;
-        seen.add(id);
-        return true;
-      })
-      .map((m: any) => ({ id: m.id.trim(), displayName: m.displayName?.trim() || undefined }));
+    aiFetchedModels.value = normalizeAiModelOptions(models);
+    aiLastModelFetchSignature = signature;
+    const fetchedById = new Map(aiFetchedModels.value.map((model) => [model.id, model]));
+    aiEditModels.value = aiEditModels.value.map((model) => {
+      const fetched = fetchedById.get(model.name);
+      if (!fetched) return model;
+      return {
+        name: model.name,
+        label: fetched.displayName || model.label,
+        supportedEffortLevels: fetched.supportedEffortLevels,
+      };
+    });
+    if (aiIsClaudeCodeCli.value) {
+      aiEditReasoningLevel.value = normalizeClaudeCodeReasoningLevel(aiEditReasoningLevel.value, aiSelectedModelInfo.value);
+    }
   } catch (e: any) {
     if (token === aiModelListRequestToken) {
       aiModelError.value = e?.message || String(e);
@@ -2229,12 +2256,16 @@ function aiIsModelSelected(modelId: string): boolean {
   return aiEditModels.value.some((m) => m.name === modelId);
 }
 
-function aiToggleModel(model: { id: string; displayName?: string }) {
+function aiToggleModel(model: AiModelInfo) {
   const index = aiEditModels.value.findIndex((m) => m.name === model.id);
   if (index >= 0) {
     aiEditModels.value.splice(index, 1);
   } else {
-    aiEditModels.value.push({ name: model.id, label: model.displayName || model.id });
+    aiEditModels.value.push({
+      name: model.id,
+      label: model.displayName || model.id,
+      supportedEffortLevels: normalizeAiModelEffortLevels(model.supportedEffortLevels),
+    });
   }
 }
 
@@ -2260,11 +2291,88 @@ const aiModelFetchSignature = computed(() =>
 
 let aiLastModelFetchSignature = "";
 
+function normalizeAiModelOptions(models: AiModelInfo[]): AiModelInfo[] {
+  const seen = new Set<string>();
+  const normalized: AiModelInfo[] = [];
+  for (const model of models) {
+    const id = model.id?.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const supportedEffortLevels = normalizeAiModelEffortLevels(model.supportedEffortLevels);
+    normalized.push({
+      id,
+      displayName: model.displayName?.trim() || undefined,
+      supportedEffortLevels: supportedEffortLevels.length ? supportedEffortLevels : undefined,
+    });
+  }
+  return normalized;
+}
+
+const aiSelectedModelInfo = computed<AiModelInfo | undefined>(() => {
+  if (aiModelFetchSignature.value === aiLastModelFetchSignature) {
+    const fetched = aiFetchedModels.value.find((model) => model.id === aiEditModel.value);
+    if (fetched) return fetched;
+  }
+  const configured = aiEditModels.value.find((model) => model.name === aiEditModel.value);
+  if (!configured) return undefined;
+  return {
+    id: configured.name,
+    displayName: configured.label,
+    supportedEffortLevels: configured.supportedEffortLevels,
+  };
+});
+const aiClaudeCodeEffortLevels = computed(() => normalizeAiModelEffortLevels(aiSelectedModelInfo.value?.supportedEffortLevels));
+const aiReasoningLevelOptions = computed<Array<{ value: AiReasoningLevel; labelKey: string }>>(() => {
+  if (!aiIsClaudeCodeCli.value) return codexReasoningLevelOptions;
+  return [{ value: "default", labelKey: "ai.reasoningLevelDefault" }, ...aiClaudeCodeEffortLevels.value.map((value) => ({ value, labelKey: effortLevelLabelKeys[value] }))];
+});
+const aiReasoningLevelDisabled = computed(() => aiIsClaudeCodeCli.value && aiClaudeCodeEffortLevels.value.length === 0);
+const aiReasoningLevelHint = computed(() => {
+  if (!aiIsClaudeCodeCli.value) return t("ai.reasoningLevelHint");
+  if (aiModelListLoading.value && aiClaudeCodeEffortLevels.value.length === 0) return t("ai.loadingModels");
+  return aiClaudeCodeEffortLevels.value.length ? t("ai.claudeCodeEffortHint") : t("ai.claudeCodeEffortUnavailable");
+});
+
+watch([aiIsClaudeCodeCli, aiSelectedModelInfo], () => {
+  if (!aiIsClaudeCodeCli.value) return;
+  aiEditReasoningLevel.value = normalizeClaudeCodeReasoningLevel(aiEditReasoningLevel.value, aiSelectedModelInfo.value);
+});
+
+function aiModelsForSave(): AiConfiguredModel[] | undefined {
+  const models = aiEditModels.value
+    .map((model) => {
+      const supportedEffortLevels = normalizeAiModelEffortLevels(model.supportedEffortLevels);
+      return {
+        name: model.name.trim(),
+        label: model.label?.trim() || undefined,
+        supportedEffortLevels: supportedEffortLevels.length ? supportedEffortLevels : undefined,
+      };
+    })
+    .filter((model) => model.name);
+
+  if (aiIsClaudeCodeCli.value && aiEditModel.value.trim() && aiSelectedModelInfo.value) {
+    const modelId = aiEditModel.value.trim();
+    const supportedEffortLevels = normalizeAiModelEffortLevels(aiSelectedModelInfo.value.supportedEffortLevels);
+    const configuredModel = models.find((model) => model.name === modelId);
+    if (configuredModel) {
+      configuredModel.label = aiSelectedModelInfo.value.displayName || configuredModel.label;
+      configuredModel.supportedEffortLevels = supportedEffortLevels.length ? supportedEffortLevels : undefined;
+    } else {
+      models.unshift({
+        name: modelId,
+        label: aiSelectedModelInfo.value.displayName,
+        supportedEffortLevels: supportedEffortLevels.length ? supportedEffortLevels : undefined,
+      });
+    }
+  }
+
+  return models.length ? models : undefined;
+}
+
 function aiOnModelPopoverOpen(open: boolean) {
   if (!open) return;
   if (aiModelFetchSignature.value !== aiLastModelFetchSignature) {
     aiFetchedModels.value = [];
-    aiLastModelFetchSignature = aiModelFetchSignature.value;
     if (aiCanListModels.value) void aiFetchModelList();
   } else if (aiFetchedModels.value.length === 0 && aiCanListModels.value) {
     void aiFetchModelList();
@@ -2282,25 +2390,14 @@ async function aiSaveConfig() {
     return;
   }
 
+  const editConfig = currentAiEditConfig();
+  aiEditReasoningLevel.value = editConfig.reasoningLevel;
+  const models = aiModelsForSave();
   const config: AiConfigItem = {
     id: aiEditConfigId.value || generateId(),
     name: aiEditConfigName.value,
-    provider: aiEditProvider.value,
-    apiKey: aiEditApiKey.value,
-    authMethod: aiEditAuthMethod.value,
-    endpoint: aiEditEndpoint.value,
-    model: aiEditModel.value,
-    models: aiEditModels.value.length > 0 ? aiEditModels.value.filter((m) => m.name.trim()) : undefined,
-    apiStyle: aiEditApiStyle.value,
-    proxyEnabled: aiEditProxyEnabled.value,
-    proxyUrl: aiEditProxyUrl.value,
-    enableThinking: aiEditEnableThinking.value,
-    reasoningLevel: aiEditReasoningLevel.value,
-    contextWindow: aiEditContextWindow.value,
-    codexCliPath: aiEditCodexCliPath.value,
-    codexCliEnv: aiIsCodexCli.value ? cliEnvFromRows(aiEditCodexCliEnvRows.value) : {},
-    claudeCodeCliPath: aiEditClaudeCodeCliPath.value,
-    claudeCodeCliEnv: aiIsClaudeCodeCli.value ? cliEnvFromRows(aiEditClaudeCodeCliEnvRows.value) : {},
+    ...editConfig,
+    models,
   };
 
   try {
@@ -4515,10 +4612,10 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <!-- Reasoning Level -->
-                <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="aiIsCodexCli || aiIsClaudeCodeCli" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.reasoningLevel") }}</Label>
                   <div class="col-span-2 space-y-1.5">
-                    <Select v-model="aiEditReasoningLevel">
+                    <Select v-model="aiEditReasoningLevel" :disabled="aiReasoningLevelDisabled">
                       <SelectTrigger inputClass="h-8 text-xs">
                         <SelectValue />
                       </SelectTrigger>
@@ -4528,7 +4625,7 @@ onUnmounted(cleanupPreviewEditor);
                         </SelectItem>
                       </SelectContent>
                     </Select>
-                    <p class="text-[11px] text-muted-foreground">{{ t("ai.reasoningLevelHint") }}</p>
+                    <p class="text-[11px] text-muted-foreground">{{ aiReasoningLevelHint }}</p>
                   </div>
                 </div>
 

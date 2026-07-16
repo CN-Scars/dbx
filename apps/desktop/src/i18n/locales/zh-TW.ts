@@ -1428,7 +1428,11 @@ export default withEnglishFallback({
     reasoningLevelLow: "低",
     reasoningLevelMedium: "中",
     reasoningLevelHigh: "高",
+    reasoningLevelXhigh: "極高",
+    reasoningLevelMax: "最高",
     reasoningLevelHint: "控制 Codex CLI 的 model_reasoning_effort。預設會使用你的 Codex 設定。",
+    claudeCodeEffortHint: "可用層級由本機 Claude Code CLI 根據所選模型動態提供。",
+    claudeCodeEffortUnavailable: "所選模型未提供可設定的推理層級，將使用 Claude Code 的預設設定。",
     actions: {
       general: "通用問答",
       generate: "產生 SQL",

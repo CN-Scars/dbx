@@ -1,5 +1,5 @@
 use crate::agent_events::AgentEvent;
-use crate::ai::{AiConfig, AiModelInfo, AiTestConnectionResult};
+use crate::ai::{AiConfig, AiEffortLevel, AiModelInfo, AiTestConnectionResult};
 use crate::ai_cli_agent::{
     build_cli_agent_prompt, cli_command, dbx_mcp_enabled_tools, dbx_mcp_scope_env, model_infos, parse_cli_jsonl_event,
     run_cli_jsonl_agent, CliAgentCommandSpec, CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
@@ -242,6 +242,10 @@ pub fn build_claude_code_command(
         args.push("--model".to_string());
         args.push(model.to_string());
     }
+    if let Some(effort) = config.reasoning_level.as_claude_code_effort() {
+        args.push("--effort".to_string());
+        args.push(effort.to_string());
+    }
 
     ClaudeCodeCommandSpec { program: claude_code_program(config), args }
 }
@@ -337,19 +341,40 @@ fn parse_claude_code_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
                 .map(ToString::to_string);
-            result.push(AiModelInfo { id: id.to_string(), display_name });
+            let mut info = AiModelInfo::new(id, display_name);
+            info.supported_effort_levels = parse_claude_code_effort_levels(model);
+            result.push(info);
         }
 
         if result.is_empty() {
             return None;
         }
         if seen.insert("default".to_string()) {
-            result.insert(0, AiModelInfo { id: "default".to_string(), display_name: Some("Default".to_string()) });
+            result.insert(0, AiModelInfo::new("default", Some("Default".to_string())));
         }
         return Some(result);
     }
 
     None
+}
+
+fn parse_claude_code_effort_levels(model: &Value) -> Vec<AiEffortLevel> {
+    if model.get("supportsEffort").or_else(|| model.get("supports_effort")).and_then(Value::as_bool) == Some(false) {
+        return Vec::new();
+    }
+    let Some(levels) =
+        model.get("supportedEffortLevels").or_else(|| model.get("supported_effort_levels")).and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    let mut seen = BTreeSet::new();
+    levels
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|level| level.parse::<AiEffortLevel>().ok())
+        .filter(|level| seen.insert(*level))
+        .collect()
 }
 
 pub async fn test_claude_code_connection(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
@@ -452,7 +477,7 @@ mod tests {
         parse_claude_code_models, validate_claude_code_program, ClaudeCodeRunOptions, DEFAULT_CLAUDE_CODE_MODELS,
     };
     use crate::agent_events::AgentEvent;
-    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider, AiReasoningLevel};
+    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiEffortLevel, AiModelInfo, AiProvider, AiReasoningLevel};
     use crate::ai_cli_agent::{model_infos, CliAgentCommandSpec};
 
     fn claude_code_config(model: &str) -> AiConfig {
@@ -462,6 +487,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: String::new(),
             model: model.to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -497,6 +523,7 @@ mod tests {
         assert!(spec.args.contains(&"--mcp-config".to_string()));
         assert!(!spec.args.contains(&"hello".to_string()));
         assert!(!spec.args.contains(&"--model".to_string()));
+        assert!(!spec.args.contains(&"--effort".to_string()));
         assert!(spec.args.iter().any(|arg| arg.contains("\"command\":\"dbx-mcp-server\"")));
         assert!(spec.args.iter().any(|arg| arg.contains("\"DBX_MCP_ALLOW_WRITES\":\"0\"")));
         assert!(spec.args.iter().any(|arg| arg.contains("\"DBX_MCP_SCOPE_CONNECTION_ID\":\"conn-1\"")));
@@ -522,6 +549,21 @@ mod tests {
     }
 
     #[test]
+    fn builds_claude_code_command_with_supported_effort() {
+        let mut config = claude_code_config("sonnet");
+        config.reasoning_level = AiReasoningLevel::Xhigh;
+
+        let spec = build_claude_code_command(&config, "hello", &run_options());
+
+        let effort_pos = spec.args.iter().position(|arg| arg == "--effort").unwrap();
+        assert_eq!(spec.args[effort_pos + 1], "xhigh");
+
+        config.reasoning_level = AiReasoningLevel::Minimal;
+        let spec = build_claude_code_command(&config, "hello", &run_options());
+        assert!(!spec.args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
     fn default_model_list_matches_supported_aliases() {
         assert_eq!(model_infos(DEFAULT_CLAUDE_CODE_MODELS), model_infos(&["default", "sonnet", "opus", "fable"]));
     }
@@ -534,7 +576,7 @@ mod tests {
             "\n",
             r#"{"type":"control_response","response":{"subtype":"success","response":{"commands":[]}}}"#,
             "\n",
-            r#"{"type":"control_response","response":{"subtype":"success","request_id":"dbx_model_discovery","response":{"models":[{"value":"default","displayName":"Default","resolvedModel":"claude-sonnet"},{"value":"claude-sonnet-4-6","displayName":"Sonnet 4.6"},{"value":"claude-sonnet-4-6","displayName":"Duplicate"},{"value":"claude-opus-4-8","display_name":"Opus 4.8"}]}}}"#
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"dbx_model_discovery","response":{"models":[{"value":"default","displayName":"Default","resolvedModel":"claude-sonnet"},{"value":"claude-sonnet-4-6","displayName":"Sonnet 4.6","supportsEffort":true,"supportedEffortLevels":["low","medium","high","max","high","future"]},{"value":"claude-sonnet-4-6","displayName":"Duplicate"},{"value":"claude-opus-4-8","display_name":"Opus 4.8","supports_effort":false,"supported_effort_levels":["low"]}]}}}"#
         );
 
         let models = parse_claude_code_models(stdout).unwrap();
@@ -542,15 +584,18 @@ mod tests {
         assert_eq!(
             models,
             vec![
-                crate::ai::AiModelInfo { id: "default".to_string(), display_name: Some("Default".to_string()) },
-                crate::ai::AiModelInfo {
+                AiModelInfo::new("default", Some("Default".to_string())),
+                AiModelInfo {
                     id: "claude-sonnet-4-6".to_string(),
-                    display_name: Some("Sonnet 4.6".to_string())
+                    display_name: Some("Sonnet 4.6".to_string()),
+                    supported_effort_levels: vec![
+                        AiEffortLevel::Low,
+                        AiEffortLevel::Medium,
+                        AiEffortLevel::High,
+                        AiEffortLevel::Max
+                    ],
                 },
-                crate::ai::AiModelInfo {
-                    id: "claude-opus-4-8".to_string(),
-                    display_name: Some("Opus 4.8".to_string())
-                }
+                AiModelInfo::new("claude-opus-4-8", Some("Opus 4.8".to_string())),
             ]
         );
     }

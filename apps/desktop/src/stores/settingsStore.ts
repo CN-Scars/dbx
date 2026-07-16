@@ -15,9 +15,9 @@ import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
-import type { AiProvider, AiApiStyle, AiAuthMethod, AiReasoningLevel, AiConfig, AiTestConnectionResult, AiConfigItem } from "@/types/ai";
+import type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem } from "@/types/ai";
 
-export type { AiProvider, AiApiStyle, AiAuthMethod, AiReasoningLevel, AiConfig, AiTestConnectionResult, AiConfigItem };
+export type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem };
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
@@ -202,7 +202,7 @@ const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = Object.from
   }),
 ) as Record<AiProvider, Omit<AiConfig, "apiKey">>;
 
-const AI_REASONING_LEVELS: AiReasoningLevel[] = ["default", "minimal", "low", "medium", "high"];
+const AI_REASONING_LEVELS: AiReasoningLevel[] = ["default", "minimal", "low", "medium", "high", "xhigh", "max"];
 const AI_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function normalizeAiReasoningLevel(value: unknown): AiReasoningLevel {

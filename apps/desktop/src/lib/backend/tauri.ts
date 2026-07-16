@@ -41,8 +41,7 @@ import type {
 import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
-import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
-import type { AiConfigItem } from "@/types/ai";
+import type { AiConfig, AiConfigItem, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
@@ -336,6 +335,7 @@ export interface AiCompletionRequest {
 export interface AiModelInfo {
   id: string;
   displayName?: string;
+  supportedEffortLevels?: AiEffortLevel[];
 }
 
 export async function aiComplete(request: AiCompletionRequest): Promise<string> {
