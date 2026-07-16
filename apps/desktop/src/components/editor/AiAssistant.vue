@@ -54,6 +54,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext } from "@/lib/ai/ai";
+import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
@@ -230,12 +231,14 @@ const modelSearchQuery = ref("");
 
 // Configured providers for quick switching - get from aiConfigs
 const configuredProviders = computed(() => {
-  const providers = settings.aiConfigs.filter((c) => {
-    // Check directly if config has required fields
-    const preset = AI_PROVIDER_PRESETS[c.provider];
-    if (c.provider === "codex-cli" || c.provider === "claude-code-cli") return true;
-    return !!c.endpoint?.trim() && !!c.model?.trim() && (!preset.requiresApiKey || !!c.apiKey?.trim());
-  });
+  const providers = orderAiConfigsForDisplay(
+    settings.aiConfigs.filter((c) => {
+      // Check directly if config has required fields
+      const preset = AI_PROVIDER_PRESETS[c.provider];
+      if (c.provider === "codex-cli" || c.provider === "claude-code-cli") return true;
+      return !!c.endpoint?.trim() && !!c.model?.trim() && (!preset.requiresApiKey || !!c.apiKey?.trim());
+    }),
+  );
   // Apply search filter - hide providers with no matching models
   if (modelSearchQuery.value.trim()) {
     const query = modelSearchQuery.value.trim().toLowerCase();

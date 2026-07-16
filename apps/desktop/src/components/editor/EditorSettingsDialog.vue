@@ -46,6 +46,7 @@ import {
   type CustomTheme,
 } from "@/stores/settingsStore";
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { normalizeAiModelEffortLevels, normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
@@ -1921,6 +1922,7 @@ async function changePassword() {
 const aiConfigListMode = ref<"list" | "edit">("list");
 const aiEditConfigName = ref("");
 const aiEditConfigId = ref<string | null>(null);
+const displayedAiConfigs = computed(() => orderAiConfigsForDisplay(settingsStore.aiConfigs));
 
 // AI Config Delete Confirmation
 const aiDeleteConfirmOpen = ref(false);
@@ -4399,7 +4401,7 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <div v-else class="space-y-2">
-                  <div v-for="config in settingsStore.aiConfigs" :key="config.id" class="flex items-center justify-between rounded-md border p-3" :class="{ 'border-primary bg-primary/5': config.isDefault }">
+                  <div v-for="config in displayedAiConfigs" :key="config.id" class="flex items-center justify-between rounded-md border p-3" :class="{ 'border-primary bg-primary/5': config.isDefault }">
                     <div class="flex items-center gap-3">
                       <AiProviderLogo :provider="config.provider" :label="config.provider" :icon-slug="AI_PROVIDER_PRESETS[config.provider].iconSlug" />
                       <div>
