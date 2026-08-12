@@ -25,12 +25,14 @@ import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database"
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution, MultiDbTargetExecutionResult } from "@/types/sqlExecution";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
+import { isMongoScriptSource } from "@/lib/mongo/mongoScript";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 
 interface SqlExecutionOptions {
   openInNewResultTab?: boolean;
   editorViewportRequestId?: number;
+  dangerousMongoScriptConfirmed?: boolean;
 }
 
 interface TargetSqlExecutionInput {
@@ -135,7 +137,7 @@ export function useSqlExecution(deps: {
   const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
   const sqlParameterEnabledSyntaxes = ref<SqlParameterSyntax[]>([]);
   const pendingSourceOffset = ref<number | undefined>();
-  const pendingDangerKind = ref<"sql" | "redis">("sql");
+  const pendingDangerKind = ref<"sql" | "redis" | "mongo-script">("sql");
   const pendingDangerSourceOffset = ref<number | undefined>();
   const pendingOpenInNewResultTab = ref(false);
   const pendingSqlParameterEditorViewportRequestId = ref<number | undefined>();
@@ -176,6 +178,16 @@ export function useSqlExecution(deps: {
   }
 
   async function continueExecute(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
+    if (deps.activeConnection.value?.db_type === "mongodb" && isMongoScriptSource(sql) && options.dangerousMongoScriptConfirmed !== true) {
+      dangerSql.value = sql;
+      pendingDangerSql.value = sql;
+      pendingDangerKind.value = "mongo-script";
+      pendingDangerSourceOffset.value = sourceOffset;
+      pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
+      suppressDangerConfirm.value = false;
+      showDangerDialog.value = true;
+      return;
+    }
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
       const commands = sql
@@ -290,13 +302,14 @@ export function useSqlExecution(deps: {
       deps.onMissingDatabase?.();
       return;
     }
-    const statementCount = splitSqlStatementRanges(sql, executionDatabaseType).length;
+    const statementCount = executionDatabaseType === "mongodb" && isMongoScriptSource(sql) ? 1 : splitSqlStatementRanges(sql, executionDatabaseType).length;
     deps.activeOutputView.value = statementCount > 1 ? "summary" : "result";
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
     const producedResult = await queryStore.executeCurrentSql(sql, {
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
+      ...(options.dangerousMongoScriptConfirmed ? { dangerousMongoScriptConfirmed: true } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
       ...(options.editorViewportRequestId !== undefined ? { onExecutionStarted: () => deps.onExecutionStarted?.(options.editorViewportRequestId!) } : {}),
@@ -543,7 +556,11 @@ export function useSqlExecution(deps: {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;
-    await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId });
+    await doExecute(sql, sourceOffset, {
+      openInNewResultTab,
+      editorViewportRequestId,
+      ...(kind === "mongo-script" ? { dangerousMongoScriptConfirmed: true } : {}),
+    });
   }
 
   async function onSqlParametersConfirm(sql: string) {
@@ -589,6 +606,7 @@ export function useSqlExecution(deps: {
   return {
     dangerSql,
     pendingDangerSql,
+    pendingDangerKind,
     showDangerDialog,
     suppressDangerConfirm,
     tryExecute,

@@ -400,6 +400,7 @@ function promptActiveDatabaseSelection() {
 const {
   dangerSql,
   pendingDangerSql,
+  pendingDangerKind,
   showDangerDialog,
   suppressDangerConfirm,
   tryExecute,
@@ -3118,6 +3119,7 @@ onUnmounted(() => {
           :connection-initial-tab="connectionDialogInitialTab"
           :show-danger-dialog="showDangerDialog"
           :danger-sql="dangerSql"
+          :danger-kind="pendingDangerKind"
           :suppress-danger-confirm="suppressDangerConfirm"
           :active-database-type="activeConnection?.db_type"
           :show-sql-parameter-dialog="showSqlParameterDialog"

@@ -1046,6 +1046,61 @@ SELECT @value AS Message;`;
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { openInNewResultTab: true });
   });
 
+  it("keeps supported MongoDB commands on the existing execution path", async () => {
+    const sql = "db.items.find({ active: true }).limit(10)";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mongodb"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["_id"], rows: [["1"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(execution.showDangerDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, {});
+  });
+
+  it("confirms an entire MongoDB script once and preserves new-result intent", async () => {
+    const sql = "for (let i = 0; i < 2; i += 1) {\n  db.items.insertOne({ index: i });\n}";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mongodb"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("summary");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["Output", "Value"], rows: [["Summary", "2/2"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecuteInNewResultTab();
+
+    expect(execution.showDangerDialog.value).toBe(true);
+    expect(execution.pendingDangerSql.value).toBe(sql);
+    expect(execution.pendingDangerKind.value).toBe("mongo-script");
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+
+    await execution.onDangerConfirm();
+
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { dangerousMongoScriptConfirmed: true, openInNewResultTab: true });
+    expect(activeOutputView.value).toBe("result");
+  });
+
   it("keeps the active retained result when a new-result dangerous prompt is cancelled", async () => {
     const result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
     const activeTab = ref<QueryTab | undefined>({
