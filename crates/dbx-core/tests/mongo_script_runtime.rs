@@ -10,6 +10,7 @@ use dbx_core::mongo_script::{
     execute_mongo_script, mongo_script_error_kind, MongoScriptErrorKind, MongoScriptHost, MongoScriptLimits,
     MongoScriptOperation, MongoScriptOutput, MongoScriptRequest,
 };
+use dbx_core::mongo_shell::{MongoCollectionMethod, MongoDatabaseMethod};
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -36,15 +37,28 @@ impl MongoScriptHost for RecordingHost {
 
         let result = match &operation {
             MongoScriptOperation::SelectDatabase { database } => Ok(json!({ "selected": database })),
-            MongoScriptOperation::DatabaseCall { method, args, .. }
-            | MongoScriptOperation::CollectionCall { method, args, .. } => match method.as_str() {
-                "echo" => Ok(args.first().cloned().unwrap_or(Value::Null)),
-                "extendedJson" => Ok(json!({
-                    "id": { "$oid": "507f1f77bcf86cd799439011" },
-                    "createdAt": { "$date": "2026-08-12T00:00:00.000Z" },
-                    "nested": [{ "owner": { "$oid": "507f191e810c19729de860ea" } }]
-                })),
-                "fail" => Err("expected host failure".to_string()),
+            MongoScriptOperation::DatabaseCall { method, args, .. } => match method {
+                MongoDatabaseMethod::Version => Ok(json!("5.0.18")),
+                MongoDatabaseMethod::RunCommand if args.first().is_some_and(|value| value.get("fail").is_some()) => {
+                    Err("expected host failure".to_string())
+                }
+                MongoDatabaseMethod::RunCommand => Ok(args.first().cloned().unwrap_or(Value::Null)),
+                MongoDatabaseMethod::CreateUser => Ok(json!({ "acknowledged": true })),
+            },
+            MongoScriptOperation::CollectionCall { method, args, .. } => match method {
+                MongoCollectionMethod::FindOne if args.first().is_some_and(|value| value.get("extended").is_some()) => {
+                    Ok(json!({
+                        "id": { "$oid": "507f1f77bcf86cd799439011" },
+                        "createdAt": { "$date": "2026-08-12T00:00:00.000Z" },
+                        "nested": [{ "owner": { "$oid": "507f191e810c19729de860ea" } }]
+                    }))
+                }
+                MongoCollectionMethod::FindOne => Ok(args.first().cloned().unwrap_or(Value::Null)),
+                MongoCollectionMethod::Find | MongoCollectionMethod::Aggregate => Ok(json!([
+                    { "index": 1, "kind": "first" },
+                    { "index": 2, "kind": "second" }
+                ])),
+                MongoCollectionMethod::Drop => Err("expected host failure".to_string()),
                 _ => Ok(json!({ "ok": 1 })),
             },
         };
@@ -155,17 +169,11 @@ async fn serializes_host_calls_and_preserves_order_and_catchable_errors() {
             r#"
             const values = [];
             for (let index = 0; index < 3; index += 1) {
-              values.push(__dbxHostCall({
-                kind: "collectionCall",
-                database: "alpha",
-                collection: "items",
-                method: "echo",
-                args: [index],
-              }));
+              values.push(db.items.findOne({ index }));
             }
             let caught = false;
             try {
-              __dbxHostCall({ kind: "databaseCall", database: "alpha", method: "fail", args: [] });
+              db.items.drop();
             } catch (error) {
               caught = error.message.includes("expected host failure");
             }
@@ -179,21 +187,19 @@ async fn serializes_host_calls_and_preserves_order_and_catchable_errors() {
     .await
     .unwrap();
 
-    assert_eq!(result.final_value, Some(json!({ "values": [0, 1, 2], "caught": true })));
+    assert_eq!(
+        result.final_value,
+        Some(json!({ "values": [{ "index": 0 }, { "index": 1 }, { "index": 2 }], "caught": true }))
+    );
     assert_eq!(result.operation_count, 4);
     assert_eq!(result.succeeded_operation_count, 3);
     assert_eq!(host.max_active.load(Ordering::SeqCst), 1);
     let operations = host.operations();
-    let methods = operations
-        .iter()
-        .map(|operation| match operation {
-            MongoScriptOperation::DatabaseCall { method, .. } | MongoScriptOperation::CollectionCall { method, .. } => {
-                method.as_str()
-            }
-            MongoScriptOperation::SelectDatabase { .. } => "selectDatabase",
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(methods, vec!["echo", "echo", "echo", "fail"]);
+    assert!(operations[..3].iter().all(|operation| matches!(
+        operation,
+        MongoScriptOperation::CollectionCall { method: MongoCollectionMethod::FindOne, .. }
+    )));
+    assert!(matches!(operations[3], MongoScriptOperation::CollectionCall { method: MongoCollectionMethod::Drop, .. }));
 }
 
 #[tokio::test]
@@ -206,12 +212,7 @@ async fn round_trips_object_id_and_iso_date_extended_json() {
               id: ObjectId("507f1f77bcf86cd799439011"),
               createdAt: ISODate("2026-08-12T00:00:00Z"),
             };
-            const received = __dbxHostCall({
-              kind: "databaseCall",
-              database: "alpha",
-              method: "extendedJson",
-              args: [sent],
-            });
+            const received = db.items.findOne({ extended: true, sent });
             ({
               sent,
               received,
@@ -229,11 +230,11 @@ async fn round_trips_object_id_and_iso_date_extended_json() {
     .unwrap();
 
     let operation = host.operations().into_iter().next().unwrap();
-    let MongoScriptOperation::DatabaseCall { args, .. } = operation else {
-        panic!("expected a database call");
+    let MongoScriptOperation::CollectionCall { args, .. } = operation else {
+        panic!("expected a collection call");
     };
-    assert_eq!(args[0]["id"], json!({ "$oid": "507f1f77bcf86cd799439011" }));
-    assert_eq!(args[0]["createdAt"], json!({ "$date": "2026-08-12T00:00:00.000Z" }));
+    assert_eq!(args[0]["sent"]["id"], json!({ "$oid": "507f1f77bcf86cd799439011" }));
+    assert_eq!(args[0]["sent"]["createdAt"], json!({ "$date": "2026-08-12T00:00:00.000Z" }));
 
     let final_value = result.final_value.unwrap();
     assert_eq!(final_value["received"]["id"], json!({ "$oid": "507f1f77bcf86cd799439011" }));
@@ -246,8 +247,8 @@ async fn round_trips_object_id_and_iso_date_extended_json() {
 async fn tracks_the_current_database_after_a_successful_selection() {
     let result = execute(
         r#"
-        __dbxHostCall({ kind: "selectDatabase", database: "analytics" });
-        "selected";
+        db = db.getSiblingDB("analytics");
+        db.getName();
         "#,
     )
     .await
@@ -324,7 +325,7 @@ async fn enforces_operation_value_memory_and_stack_limits() {
         request(
             r#"
             for (let index = 0; index < 3; index += 1) {
-              __dbxHostCall({ kind: "databaseCall", database: "alpha", method: "echo", args: [index] });
+              db.items.findOne({ index });
             }
             "#,
         ),
@@ -375,7 +376,7 @@ async fn enforces_operation_value_memory_and_stack_limits() {
 async fn categorizes_uncaught_host_errors() {
     let error = execute(
         r#"
-        __dbxHostCall({ kind: "databaseCall", database: "alpha", method: "fail", args: [] });
+        db.items.drop();
         "#,
     )
     .await
@@ -412,7 +413,7 @@ async fn cancellation_releases_a_worker_waiting_for_a_host_call() {
         request(
             r#"
             try {
-              __dbxHostCall({ kind: "databaseCall", database: "alpha", method: "blocked", args: [] });
+              db.items.findOne({ blocked: true });
             } catch (_) {
               // Cancellation must still win even when user code catches the host exception.
             }
@@ -432,4 +433,192 @@ async fn cancellation_releases_a_worker_waiting_for_a_host_call() {
         .unwrap()
         .unwrap_err();
     assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::Cancelled));
+}
+
+#[tokio::test]
+async fn executes_the_issue_loop_in_order_and_reports_one_summary() {
+    let host = Arc::new(RecordingHost::default());
+    let result = execute_mongo_script(
+        request(
+            r#"
+            for(var index=0;index<1000;index++){
+              db.large_test.insertOne({_id:index})
+            }
+            "#,
+        ),
+        MongoScriptLimits::default(),
+        host.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.final_value, Some(json!({ "ok": 1 })));
+    assert_eq!(result.operation_count, 1000);
+    assert_eq!(result.succeeded_operation_count, 1000);
+    let operations = host.operations();
+    assert_eq!(operations.len(), 1000);
+    for (index, operation) in operations.iter().enumerate() {
+        let MongoScriptOperation::CollectionCall { database, collection, method, args, cursor } = operation else {
+            panic!("expected an insertOne collection call");
+        };
+        assert_eq!(database, "initial_database");
+        assert_eq!(collection, "large_test");
+        assert_eq!(*method, MongoCollectionMethod::InsertOne);
+        assert_eq!(args, &[json!({ "_id": index })]);
+        assert!(cursor.is_none());
+    }
+}
+
+#[tokio::test]
+async fn supports_data_dependent_branches_and_database_collection_helpers() {
+    let host = Arc::new(RecordingHost::default());
+    let result = execute_mongo_script(
+        request(
+            r#"
+            const source = db.getCollection("items").findOne({ enabled: true });
+            if (source.enabled) {
+              db = db.getSiblingDB("analytics");
+              db.getCollection("audit.logs").insertOne({ source: "items", enabled: source.enabled });
+            }
+            ({ database: db.getName(), source });
+            "#,
+        ),
+        MongoScriptLimits::default(),
+        host.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.current_database, "analytics");
+    assert_eq!(result.operation_count, 3);
+    assert_eq!(result.succeeded_operation_count, 3);
+    assert_eq!(result.final_value, Some(json!({ "database": "analytics", "source": { "enabled": true } })));
+    let operations = host.operations();
+    assert!(matches!(
+        &operations[1],
+        MongoScriptOperation::SelectDatabase { database } if database == "analytics"
+    ));
+    assert!(matches!(
+        &operations[2],
+        MongoScriptOperation::CollectionCall {
+            database,
+            collection,
+            method: MongoCollectionMethod::InsertOne,
+            ..
+        } if database == "analytics" && collection == "audit.logs"
+    ));
+}
+
+#[tokio::test]
+async fn materializes_bounded_find_and_aggregate_cursors_once() {
+    let find_host = Arc::new(RecordingHost::default());
+    let find_result = execute_mongo_script(
+        request(
+            r#"
+            db.items.find({ active: true }, { name: 1 })
+              .sort({ name: 1 })
+              .collation({ locale: "en", strength: 1 })
+              .skip(2)
+              .limit(5);
+            "#,
+        ),
+        MongoScriptLimits::default(),
+        find_host.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        find_result.final_value,
+        Some(json!([{ "index": 1, "kind": "first" }, { "index": 2, "kind": "second" }]))
+    );
+    let operations = find_host.operations();
+    let [MongoScriptOperation::CollectionCall { method, args, cursor, .. }] = operations.as_slice() else {
+        panic!("expected exactly one find call");
+    };
+    assert_eq!(*method, MongoCollectionMethod::Find);
+    assert_eq!(args, &[json!({ "active": true }), json!({ "name": 1 })]);
+    let cursor = cursor.as_deref().expect("find cursor options must be present");
+    assert_eq!(cursor.sort, Some(json!({ "name": 1 })));
+    assert_eq!(cursor.collation, Some(json!({ "locale": "en", "strength": 1 })));
+    assert_eq!(cursor.skip, 2);
+    assert_eq!(cursor.limit, 5);
+
+    let aggregate_host = Arc::new(RecordingHost::default());
+    let aggregate_result = execute_mongo_script(
+        request(
+            r#"
+            const indexes = [];
+            const cursor = db.items.aggregate([{ $match: { active: true } }]);
+            cursor.forEach((document) => indexes.push(document.index));
+            cursor.toArray();
+            indexes;
+            "#,
+        ),
+        MongoScriptLimits::default(),
+        aggregate_host.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(aggregate_result.final_value, Some(json!([1, 2])));
+    assert_eq!(aggregate_result.operation_count, 1);
+    assert!(matches!(
+        aggregate_host.operations().as_slice(),
+        [MongoScriptOperation::CollectionCall { method: MongoCollectionMethod::Aggregate, cursor: None, .. }]
+    ));
+
+    let terminal_host = Arc::new(RecordingHost::default());
+    execute_mongo_script(
+        request(
+            r#"
+            const count = db.items.find({ active: true }).count();
+            const plan = db.items.find({ active: true }).sort({ name: 1 }).explain("executionStats");
+            ({ count, plan });
+            "#,
+        ),
+        MongoScriptLimits::default(),
+        terminal_host.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let operations = terminal_host.operations();
+    assert!(matches!(
+        operations.as_slice(),
+        [
+            MongoScriptOperation::CollectionCall { method: MongoCollectionMethod::Count, cursor: None, .. },
+            MongoScriptOperation::CollectionCall { method: MongoCollectionMethod::FindExplain, cursor: Some(_), .. }
+        ]
+    ));
+    let MongoScriptOperation::CollectionCall { cursor: Some(cursor), .. } = &operations[1] else {
+        panic!("expected explain cursor options");
+    };
+    assert_eq!(cursor.sort, Some(json!({ "name": 1 })));
+    assert_eq!(cursor.explain_verbosity.as_deref(), Some("executionStats"));
+}
+
+#[tokio::test]
+async fn reports_partial_progress_and_rejects_unsupported_facade_methods() {
+    let partial_error = execute(
+        r#"
+        db.items.findOne({ _id: 1 });
+        db.items.drop();
+        "#,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(mongo_script_error_kind(&partial_error), Some(MongoScriptErrorKind::Host));
+    assert!(partial_error.contains("1 of 2 attempted operations succeeded"));
+
+    let unsupported_error = execute("db.items.bulkWrite([]);").await.unwrap_err();
+    assert_eq!(mongo_script_error_kind(&unsupported_error), Some(MongoScriptErrorKind::Runtime));
+    assert!(unsupported_error.contains("Unsupported MongoDB collection method: bulkWrite"));
+
+    let forged_database_error = execute(r#"db = { __dbxDatabaseName: "admin" };"#).await.unwrap_err();
+    assert_eq!(mongo_script_error_kind(&forged_database_error), Some(MongoScriptErrorKind::Runtime));
+    assert!(forged_database_error.contains("db can only be assigned a DBX MongoDB database handle"));
 }

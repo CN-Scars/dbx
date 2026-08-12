@@ -11,6 +11,14 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::connection::AppState;
+use crate::mongo_ops::execute_mongo_command_core;
+use crate::mongo_shell::{
+    apply_mongo_find_cursor, build_mongo_collection_command, build_mongo_database_command,
+    build_mongo_find_explain_command, MongoCollectionMethod, MongoDatabaseMethod, MongoFindCursor,
+};
+use crate::types::QueryResult;
+
 const DEFAULT_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_STACK_LIMIT_BYTES: usize = 512 * 1024;
 const DEFAULT_MAX_OPERATIONS: usize = 10_000;
@@ -23,6 +31,8 @@ const DEFAULT_SAFETY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const RAW_HOST_CALL_GLOBAL: &str = "__dbxRawHostCall";
 const OUTPUT_GLOBAL: &str = "__dbxCaptureOutput";
+const INITIAL_DATABASE_GLOBAL: &str = "__dbxInitialDatabase";
+const FINALIZE_GLOBAL: &str = "__dbxFinalize";
 
 const RUNTIME_BOOTSTRAP: &str = r#"
 (() => {
@@ -91,6 +101,159 @@ const RUNTIME_BOOTSTRAP: &str = r#"
     }
   }
 
+  const cursorMarker = Symbol("dbxMongoCursor");
+  const databaseMarker = Symbol("dbxMongoDatabase");
+  const databaseMethods = new Set(["version", "runCommand", "createUser"]);
+  const collectionMethods = new Set([
+    "find", "findOne", "countDocuments", "count", "aggregate", "distinct", "getIndexes",
+    "stats", "dataSize", "storageSize", "totalIndexSize", "insertOne", "insertMany", "insert",
+    "updateOne", "updateMany", "update", "deleteOne", "deleteMany", "createIndex", "dropIndex",
+    "dropIndexes", "drop", "findOneAndUpdate", "findOneAndReplace", "findOneAndDelete",
+  ]);
+
+  function normalizeArguments(values) {
+    return Array.from(values, (value) => value === undefined ? null : value);
+  }
+
+  class MongoCursor {
+    constructor(database, collection, method, args) {
+      this[cursorMarker] = true;
+      this.database = database;
+      this.collection = collection;
+      this.method = method;
+      this.args = normalizeArguments(args);
+      this.cursor = method === "find" ? { skip: 0, limit: 0 } : null;
+      this.materialized = null;
+    }
+
+    sort(value) {
+      if (this.method !== "find") throw new TypeError("sort() is only supported for find() cursors");
+      this.cursor.sort = value;
+      return this;
+    }
+
+    collation(value) {
+      if (this.method !== "find") throw new TypeError("collation() is only supported for find() cursors");
+      this.cursor.collation = value;
+      return this;
+    }
+
+    skip(value) {
+      if (this.method !== "find" || !Number.isSafeInteger(value) || value < 0) {
+        throw new TypeError("skip() requires a non-negative safe integer on a find() cursor");
+      }
+      this.cursor.skip = value;
+      return this;
+    }
+
+    limit(value) {
+      if (this.method !== "find" || !Number.isSafeInteger(value)) {
+        throw new TypeError("limit() requires a safe integer on a find() cursor");
+      }
+      this.cursor.limit = value;
+      return this;
+    }
+
+    count() {
+      if (this.method !== "find") throw new TypeError("count() is only supported for find() cursors");
+      return __dbxHostCall({
+        kind: "collectionCall",
+        database: this.database,
+        collection: this.collection,
+        method: "count",
+        args: [this.args[0] === undefined || this.args[0] === null ? {} : this.args[0]],
+      });
+    }
+
+    explain(verbosity = "queryPlanner") {
+      if (this.method !== "find") throw new TypeError("explain() is only supported for find() cursors");
+      if (!["queryPlanner", "executionStats", "allPlansExecution"].includes(verbosity)) {
+        throw new TypeError("MongoDB explain() verbosity must be queryPlanner, executionStats, or allPlansExecution");
+      }
+      return __dbxHostCall({
+        kind: "collectionCall",
+        database: this.database,
+        collection: this.collection,
+        method: "findExplain",
+        args: this.args,
+        cursor: { ...this.cursor, explainVerbosity: verbosity },
+      });
+    }
+
+    toArray() {
+      if (this.materialized === null) {
+        this.materialized = __dbxHostCall({
+          kind: "collectionCall",
+          database: this.database,
+          collection: this.collection,
+          method: this.method,
+          args: this.args,
+          cursor: this.cursor,
+        });
+      }
+      return this.materialized;
+    }
+
+    forEach(callback) {
+      if (typeof callback !== "function") throw new TypeError("forEach() requires a callback function");
+      this.toArray().forEach(callback);
+    }
+  }
+
+  function createCollection(database, collection) {
+    if (typeof collection !== "string" || collection.length === 0) {
+      throw new TypeError("MongoDB collection name must be a non-empty string");
+    }
+    return new Proxy(Object.create(null), {
+      get(_target, property) {
+        if (property === "then") return undefined;
+        if (property === "getName") return () => collection;
+        if (property === "toString") return () => `${database}.${collection}`;
+        if (typeof property !== "string" || !collectionMethods.has(property)) {
+          throw new TypeError(`Unsupported MongoDB collection method: ${String(property)}`);
+        }
+        if (property === "find" || property === "aggregate") {
+          return (...args) => new MongoCursor(database, collection, property, args);
+        }
+        return (...args) => __dbxHostCall({
+          kind: "collectionCall",
+          database,
+          collection,
+          method: property,
+          args: normalizeArguments(args),
+        });
+      },
+    });
+  }
+
+  function createDatabase(database) {
+    if (typeof database !== "string" || database.length === 0) {
+      throw new TypeError("MongoDB database name must be a non-empty string");
+    }
+    return new Proxy(Object.create(null), {
+      get(_target, property) {
+        if (property === "then") return undefined;
+        if (property === databaseMarker) return database;
+        if (property === "getName") return () => database;
+        if (property === "toString") return () => database;
+        if (property === "getCollection") return (name) => createCollection(database, name);
+        if (property === "getSiblingDB") return (name) => createDatabase(name);
+        if (typeof property === "string" && databaseMethods.has(property)) {
+          return (...args) => __dbxHostCall({
+            kind: "databaseCall",
+            database,
+            method: property,
+            args: normalizeArguments(args),
+          });
+        }
+        if (typeof property === "string") return createCollection(database, property);
+        return undefined;
+      },
+    });
+  }
+
+  let currentDatabase = createDatabase(__dbxInitialDatabase);
+
   Object.defineProperties(globalThis, {
     ObjectId: { value: ObjectId, writable: false, configurable: false },
     ISODate: { value: ISODate, writable: false, configurable: false },
@@ -98,6 +261,23 @@ const RUNTIME_BOOTSTRAP: &str = r#"
     __dbxHostCall: {
       value: (operation) => reviveExtendedJson(JSON.parse(__dbxRawHostCall(operation))),
       writable: false,
+      configurable: false,
+    },
+    __dbxFinalize: {
+      value: (value) => value && value[cursorMarker] === true ? value.toArray() : value,
+      writable: false,
+      configurable: false,
+    },
+    db: {
+      get: () => currentDatabase,
+      set: (value) => {
+        const database = value && value[databaseMarker];
+        if (typeof database !== "string" || database.length === 0) {
+          throw new TypeError("db can only be assigned a DBX MongoDB database handle");
+        }
+        __dbxHostCall({ kind: "selectDatabase", database });
+        currentDatabase = value;
+      },
       configurable: false,
     },
     print: {
@@ -135,16 +315,18 @@ pub enum MongoScriptOperation {
     },
     DatabaseCall {
         database: String,
-        method: String,
+        method: MongoDatabaseMethod,
         #[serde(default)]
         args: Vec<Value>,
     },
     CollectionCall {
         database: String,
         collection: String,
-        method: String,
+        method: MongoCollectionMethod,
         #[serde(default)]
         args: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<Box<MongoFindCursor>>,
     },
 }
 
@@ -269,6 +451,136 @@ pub trait MongoScriptHost: Send + Sync {
     async fn execute(&self, operation: MongoScriptOperation) -> Result<Value, String>;
 }
 
+struct MongoScriptCommandHost {
+    state: Arc<AppState>,
+    connection_id: String,
+    max_rows: usize,
+}
+
+#[async_trait]
+impl MongoScriptHost for MongoScriptCommandHost {
+    async fn execute(&self, operation: MongoScriptOperation) -> Result<Value, String> {
+        let (database, command) = match operation {
+            MongoScriptOperation::SelectDatabase { database } => {
+                return Ok(serde_json::json!({ "database": database }));
+            }
+            MongoScriptOperation::DatabaseCall { database, method, args } => {
+                let command = build_mongo_database_command(method, &args)?;
+                (database, command)
+            }
+            MongoScriptOperation::CollectionCall { database, collection, method, args, cursor } => {
+                let mut command = if method == MongoCollectionMethod::FindExplain {
+                    build_mongo_find_explain_command(
+                        &collection,
+                        &args,
+                        cursor.as_deref().ok_or("MongoDB findExplain requires cursor options.")?,
+                    )?
+                } else {
+                    build_mongo_collection_command(&collection, method, &args)?
+                };
+                if method != MongoCollectionMethod::FindExplain {
+                    if let Some(cursor) = cursor.as_deref() {
+                        apply_mongo_find_cursor(&mut command, cursor)?;
+                    }
+                }
+                (database, command)
+            }
+        };
+        let result =
+            execute_mongo_command_core(&self.state, &self.connection_id, &database, &command, self.max_rows).await?;
+        mongo_command_result_for_script(&command, result)
+    }
+}
+
+pub async fn execute_mongo_script_core(
+    state: Arc<AppState>,
+    request: MongoScriptRequest,
+    limits: MongoScriptLimits,
+    cancellation: CancellationToken,
+) -> Result<MongoScriptResult, String> {
+    let host = Arc::new(MongoScriptCommandHost {
+        state,
+        connection_id: request.connection_id.clone(),
+        max_rows: request.max_rows,
+    });
+    execute_mongo_script(request, limits, host, cancellation).await
+}
+
+fn mongo_command_result_value(
+    command: &crate::mongo_shell::MongoCommand,
+    result: QueryResult,
+) -> Result<Value, String> {
+    use crate::mongo_shell::MongoCommand;
+
+    let documents = query_result_documents(&result);
+    match command {
+        MongoCommand::Version => Ok(first_query_cell(&result).unwrap_or(Value::Null)),
+        MongoCommand::Use { database } => Ok(Value::String(database.clone())),
+        MongoCommand::RunCommand { .. } => Ok(documents.into_iter().next().unwrap_or(Value::Null)),
+        MongoCommand::CollectionStats { metric, .. } if metric == "stats" => {
+            Ok(documents.into_iter().next().unwrap_or(Value::Null))
+        }
+        MongoCommand::Find { .. } | MongoCommand::Aggregate { .. } | MongoCommand::GetIndexes { .. } => {
+            Ok(Value::Array(documents))
+        }
+        MongoCommand::FindExplain { .. } => Ok(documents.into_iter().next().unwrap_or(Value::Null)),
+        MongoCommand::FindOne { .. }
+        | MongoCommand::FindOneAndUpdate { .. }
+        | MongoCommand::FindOneAndReplace { .. }
+        | MongoCommand::FindOneAndDelete { .. } => Ok(documents.into_iter().next().unwrap_or(Value::Null)),
+        MongoCommand::Count { .. } | MongoCommand::CollectionStats { .. } => {
+            Ok(first_query_cell(&result).unwrap_or(Value::Null))
+        }
+        MongoCommand::Distinct { .. } => {
+            Ok(Value::Array(result.rows.into_iter().filter_map(|row| row.into_iter().next()).collect()))
+        }
+        MongoCommand::CreateIndex { .. } => Ok(serde_json::json!({
+            "acknowledged": true,
+            "name": first_query_cell(&result).unwrap_or(Value::Null),
+        })),
+        MongoCommand::Insert { .. }
+        | MongoCommand::Update { .. }
+        | MongoCommand::Delete { .. }
+        | MongoCommand::CreateUser { .. }
+        | MongoCommand::DropIndexes { .. }
+        | MongoCommand::DropCollection { .. } => Ok(serde_json::json!({
+            "acknowledged": true,
+            "affectedRows": result.affected_rows,
+        })),
+    }
+}
+
+fn mongo_command_result_for_script(
+    command: &crate::mongo_shell::MongoCommand,
+    result: QueryResult,
+) -> Result<Value, String> {
+    mongo_command_result_value(command, result).map(crate::db::json_value_for_js)
+}
+
+fn first_query_cell(result: &QueryResult) -> Option<Value> {
+    result.rows.first().and_then(|row| row.first()).cloned()
+}
+
+fn query_result_documents(result: &QueryResult) -> Vec<Value> {
+    result
+        .rows
+        .iter()
+        .map(|row| {
+            if result.columns.len() == 1 && result.columns[0] == "value" {
+                return row.first().cloned().unwrap_or(Value::Null);
+            }
+            Value::Object(
+                result
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, column)| (column.clone(), row.get(index).cloned().unwrap_or(Value::Null)))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 struct HostRequest {
     operation: MongoScriptOperation,
     reply: oneshot::Sender<Result<Value, String>>,
@@ -385,8 +697,14 @@ pub async fn execute_mongo_script(
     let current_database = Arc::new(Mutex::new(request.database.clone()));
     let (operation_tx, mut operation_rx) = mpsc::channel::<HostRequest>(1);
 
-    let mut worker =
-        spawn_runtime_worker(request.source, limits.clone(), Arc::clone(&state), Arc::clone(&output), operation_tx);
+    let mut worker = spawn_runtime_worker(
+        request.source,
+        request.database,
+        limits.clone(),
+        Arc::clone(&state),
+        Arc::clone(&output),
+        operation_tx,
+    );
     let mut operation_channel_open = true;
 
     loop {
@@ -476,16 +794,18 @@ fn validate_request(request: &MongoScriptRequest, limits: &MongoScriptLimits) ->
 
 fn spawn_runtime_worker(
     source: String,
+    initial_database: String,
     limits: MongoScriptLimits,
     state: Arc<ExecutionState>,
     output: Arc<Mutex<OutputState>>,
     operation_tx: mpsc::Sender<HostRequest>,
 ) -> JoinHandle<Result<WorkerResult, String>> {
-    tokio::task::spawn_blocking(move || run_runtime(source, limits, state, output, operation_tx))
+    tokio::task::spawn_blocking(move || run_runtime(source, initial_database, limits, state, output, operation_tx))
 }
 
 fn run_runtime(
     source: String,
+    initial_database: String,
     limits: MongoScriptLimits,
     state: Arc<ExecutionState>,
     output: Arc<Mutex<OutputState>>,
@@ -506,6 +826,10 @@ fn run_runtime(
         install_host_call(context.clone(), Arc::clone(&state), &limits, operation_tx)?;
         install_output_capture(context.clone(), Arc::clone(&output), &limits)?;
         context
+            .globals()
+            .set(INITIAL_DATABASE_GLOBAL, initial_database)
+            .map_err(|error| script_error(MongoScriptErrorKind::Runtime, error.to_string()))?;
+        context
             .eval::<(), _>(RUNTIME_BOOTSTRAP)
             .catch(&context)
             .map_err(|error| script_error_from_js(error.to_string()))?;
@@ -519,6 +843,14 @@ fn run_runtime(
         } else {
             value
         };
+        let finalize = context
+            .globals()
+            .get::<_, Function<'_>>(FINALIZE_GLOBAL)
+            .map_err(|error| script_error(MongoScriptErrorKind::Runtime, error.to_string()))?;
+        let value = finalize
+            .call::<_, JsValue<'_>>((value,))
+            .catch(&context)
+            .map_err(|error| script_error_from_js(error.to_string()))?;
         let final_value = if value.is_undefined() {
             None
         } else {
@@ -600,7 +932,8 @@ fn finish_worker(
     }
     let worker_result = worker_result.map_err(|error| {
         script_error(MongoScriptErrorKind::Runtime, format!("JavaScript runtime worker failed: {error}"))
-    })??;
+    })?;
+    let worker_result = worker_result.map_err(|error| with_operation_progress(error, state))?;
     let output = output
         .lock()
         .map_err(|_| script_error(MongoScriptErrorKind::Runtime, "MongoDB script output state is unavailable"))?;
@@ -615,6 +948,15 @@ fn finish_worker(
         current_database: current_database.clone(),
         truncated: output.truncated,
     })
+}
+
+fn with_operation_progress(error: String, state: &ExecutionState) -> String {
+    let attempted = state.operation_count.load(Ordering::SeqCst);
+    if attempted == 0 {
+        return error;
+    }
+    let succeeded = state.succeeded_operation_count.load(Ordering::SeqCst);
+    format!("{error} (MongoDB shell stopped after {succeeded} of {attempted} attempted operations succeeded)")
 }
 
 fn interrupt_error(reason: InterruptReason) -> String {
@@ -675,4 +1017,82 @@ fn validate_json_value(value: &Value, limits: &MongoScriptLimits) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mongo_shell::MongoCommand;
+
+    fn query_result(columns: &[&str], rows: Vec<Vec<Value>>, affected_rows: u64) -> QueryResult {
+        QueryResult {
+            columns: columns.iter().map(|column| (*column).to_string()).collect(),
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows,
+            affected_rows,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn command_result_mapping_preserves_nested_documents_and_scalar_shapes() {
+        let find = MongoCommand::Find {
+            collection: "items".to_string(),
+            filter: "{}".to_string(),
+            projection: None,
+            sort: None,
+            collation: None,
+            skip: 0,
+            limit: 10,
+        };
+        let nested = serde_json::json!({ "tags": ["one", "two"], "owner": { "id": 7 } });
+        let value = mongo_command_result_value(
+            &find,
+            query_result(&["_id", "nested"], vec![vec![serde_json::json!(1), nested.clone()]], 0),
+        )
+        .unwrap();
+        assert_eq!(value, serde_json::json!([{ "_id": 1, "nested": nested }]));
+
+        let count = MongoCommand::Count { collection: "items".to_string(), filter: "{}".to_string(), accurate: true };
+        assert_eq!(
+            mongo_command_result_value(&count, query_result(&["count"], vec![vec![serde_json::json!(12)]], 0)).unwrap(),
+            serde_json::json!(12)
+        );
+        assert_eq!(
+            mongo_command_result_for_script(
+                &count,
+                query_result(&["count"], vec![vec![serde_json::json!(9_007_199_254_740_992_u64)]], 0),
+            )
+            .unwrap(),
+            serde_json::json!("9007199254740992")
+        );
+    }
+
+    #[test]
+    fn command_result_mapping_returns_distinct_arrays_and_write_acknowledgements() {
+        let distinct =
+            MongoCommand::Distinct { collection: "items".to_string(), field: "status".to_string(), filter: None };
+        assert_eq!(
+            mongo_command_result_value(
+                &distinct,
+                query_result(&["value"], vec![vec![serde_json::json!("open")], vec![serde_json::json!("closed")]], 0,),
+            )
+            .unwrap(),
+            serde_json::json!(["open", "closed"])
+        );
+
+        let insert = MongoCommand::Insert { collection: "items".to_string(), documents: "{\"_id\":1}".to_string() };
+        assert_eq!(
+            mongo_command_result_value(&insert, query_result(&[], Vec::new(), 1)).unwrap(),
+            serde_json::json!({ "acknowledged": true, "affectedRows": 1 })
+        );
+    }
 }
