@@ -1387,6 +1387,7 @@ for line in sys.stdin:
             "db.items.updateMany({tenant: 7}, {$set: {active: false}})",
             "db.items.deleteMany({tenant: 7})",
             "db.items.createIndex({tenant: 1})",
+            "db.runCommand({compact: 'items'})",
             r#"db.items.aggregate([{"$out":"items_backup"}])"#,
         ]
         .into_iter()

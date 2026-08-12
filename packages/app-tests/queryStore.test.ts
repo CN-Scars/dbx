@@ -4838,6 +4838,56 @@ db.createUser({
   }
 });
 
+test("mongo runCommand execution follows use and preserves document results", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let runCommandBody: any;
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/mongo/run-command") {
+      runCommandBody = JSON.parse(String(init?.body ?? "{}"));
+      return Response.json({
+        documents: [{ ok: 1, mode: "primary" }],
+        extended_documents: [{ ok: { $numberInt: "1" }, mode: "primary" }],
+        total: 1,
+        total_is_exact: true,
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(tabId, 'use admin\n\ndb.runCommand({ hello: 1, comment: "DBX #3050" })');
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.deepEqual(runCommandBody, {
+      connectionId: "mongo-1",
+      database: "admin",
+      commandJson: '{"hello":1,"comment":"DBX #3050"}',
+      executionId: runCommandBody.executionId,
+    });
+    assert.equal(typeof runCommandBody.executionId, "string");
+    assert.equal(tab?.database, "admin");
+    assert.equal(tab?.results?.length, 2);
+    assert.deepEqual(tab?.results?.[1]?.columns, ["ok", "mode"]);
+    assert.deepEqual(tab?.results?.[1]?.rows, [[1, "primary"]]);
+    assert.deepEqual(tab?.results?.[1]?.mongo_copy_documents, [{ ok: { $numberInt: "1" }, mode: "primary" }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("mongo dropIndex execution uses the dedicated drop-indexes endpoint", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

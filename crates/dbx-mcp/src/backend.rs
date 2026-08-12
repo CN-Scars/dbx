@@ -972,6 +972,9 @@ impl DbxBackend for WebBackend {
                 Ok(scalar_query_result("version", Value::String(version)))
             }
             MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
+            MongoCommand::RunCommand { .. } => {
+                Err("MongoDB runCommand is not available through the DBX MCP backend".to_string())
+            }
             MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit } => {
                 let result = self
                     .request(

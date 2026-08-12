@@ -940,6 +940,21 @@ public final class MongoAgent {
         return serverVersionFromBuildInfo(buildInfo);
     }
 
+    private static Object runCommand(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        Document command = documentOrNull(params, "command_json");
+        if (command == null || command.isEmpty()) {
+            throw new IllegalArgumentException("runCommand requires a non-empty command document");
+        }
+        Document response = c.getDatabase(database).runCommand(command);
+        List<Map<String, Object>> documents = new ArrayList<>();
+        documents.add(bsonToJson(response));
+        List<JsonObject> extendedDocuments = new ArrayList<>();
+        extendedDocuments.add(bsonToExtendedJson(response));
+        return documentQueryResultWithExtended(documents, extendedDocuments, 1);
+    }
+
     static String serverVersionFromBuildInfo(Document buildInfo) {
         String version = buildInfo.getString("version");
         if (version == null || version.isBlank()) {
@@ -1819,6 +1834,7 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENTS -> updateDocuments(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENT -> deleteDocument(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENTS -> deleteDocuments(params);
+            case AgentProtocol.MONGO_METHOD_RUN_COMMAND -> runCommand(params);
             case AgentProtocol.METHOD_DISCONNECT, AgentProtocol.METHOD_SHUTDOWN -> {
                 closeLegacyClient();
                 if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {

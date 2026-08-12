@@ -973,6 +973,7 @@ pub enum AgentCapability {
     EtcdAuth,
     MongoDropDatabase,
     MongoCloneCollection,
+    MongoRunCommand,
     MultiSession,
     StructuredErrorV1,
 }
@@ -1055,7 +1056,7 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -1076,6 +1077,7 @@ impl AgentCapability {
         Self::EtcdAuth,
         Self::MongoDropDatabase,
         Self::MongoCloneCollection,
+        Self::MongoRunCommand,
         Self::MultiSession,
         Self::StructuredErrorV1,
     ];
@@ -1102,6 +1104,7 @@ impl AgentCapability {
             Self::EtcdAuth => "etcd_auth",
             Self::MongoDropDatabase => "mongo_drop_database",
             Self::MongoCloneCollection => "mongo_clone_collection",
+            Self::MongoRunCommand => "mongo_run_command",
             Self::MultiSession => "multi_session",
             Self::StructuredErrorV1 => "structured_error_v1",
         }
@@ -1294,10 +1297,11 @@ pub enum MongoAgentMethod {
     UpdateDocuments,
     DeleteDocument,
     DeleteDocuments,
+    RunCommand,
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
@@ -1318,6 +1322,7 @@ impl MongoAgentMethod {
         Self::UpdateDocuments,
         Self::DeleteDocument,
         Self::DeleteDocuments,
+        Self::RunCommand,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -1342,6 +1347,7 @@ impl MongoAgentMethod {
             Self::UpdateDocuments => "update_documents",
             Self::DeleteDocument => "delete_document",
             Self::DeleteDocuments => "delete_documents",
+            Self::RunCommand => "run_command",
         }
     }
 }
@@ -2539,6 +2545,13 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::ServerVersion, mongo_database_params(database)).await
     }
 
+    pub async fn mongo_run_command<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::RunCommand, params).await
+    }
+
     pub async fn mongo_create_index<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -2755,6 +2768,7 @@ pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability:
             | AgentCapability::EtcdAuth
             | AgentCapability::MongoDropDatabase
             | AgentCapability::MongoCloneCollection
+            | AgentCapability::MongoRunCommand
     ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
     }
@@ -4343,9 +4357,10 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::EtcdAuth.as_str(), "etcd_auth");
         assert_eq!(AgentCapability::MongoDropDatabase.as_str(), "mongo_drop_database");
         assert_eq!(AgentCapability::MongoCloneCollection.as_str(), "mongo_clone_collection");
+        assert_eq!(AgentCapability::MongoRunCommand.as_str(), "mongo_run_command");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
         assert_eq!(AgentCapability::StructuredErrorV1.as_str(), "structured_error_v1");
-        assert_eq!(AgentCapability::ALL.len(), 22);
+        assert_eq!(AgentCapability::ALL.len(), 23);
     }
 
     #[test]
@@ -4702,6 +4717,8 @@ for line in sys.stdin:
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoDropDatabase));
         assert!(!agent_supports_capability(None, AgentCapability::MongoCloneCollection));
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoCloneCollection));
+        assert!(!agent_supports_capability(None, AgentCapability::MongoRunCommand));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoRunCommand));
 
         let mongo_handshake =
             AgentHandshake { capabilities: vec![AgentCapability::MongoDropDatabase.as_str().to_string()], ..handshake };
@@ -4712,6 +4729,12 @@ for line in sys.stdin:
             ..mongo_handshake
         };
         assert!(agent_supports_capability(Some(&mongo_clone_handshake), AgentCapability::MongoCloneCollection));
+
+        let mongo_run_command_handshake = AgentHandshake {
+            capabilities: vec![AgentCapability::MongoRunCommand.as_str().to_string()],
+            ..mongo_clone_handshake
+        };
+        assert!(agent_supports_capability(Some(&mongo_run_command_handshake), AgentCapability::MongoRunCommand));
     }
 
     #[test]

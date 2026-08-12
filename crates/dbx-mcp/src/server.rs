@@ -1059,6 +1059,12 @@ fn validate_mongo_command(
             ),
         )
     })?;
+    if matches!(command, MongoCommand::RunCommand { .. }) {
+        return Err(tool_error(
+            "SQL_BLOCKED",
+            "MongoDB runCommand is not available through MCP; review and execute it manually in DBX.",
+        ));
+    }
     let permissions = mcp_permissions(connection, policy);
     let production_database = match &command {
         MongoCommand::Aggregate { pipeline, .. } => {
@@ -1496,6 +1502,22 @@ mod tests {
         assert!(
             validate_mongo_command(&mongo, &policy, "staging", r#"db.items.aggregate([{"$out":"archive"}])"#,).is_ok()
         );
+    }
+
+    #[test]
+    fn mongo_run_command_is_never_exposed_through_mcp() {
+        let mongo = connection("mongo", "mongo", "mongodb", "staging");
+        let source = r#"db.runCommand({ping: 1})"#;
+
+        for policy in [
+            McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None },
+            McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None },
+            McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None },
+        ] {
+            let error = validate_mongo_command(&mongo, &policy, "staging", source).unwrap_err();
+            assert!(result_text(&error).contains("SQL_BLOCKED"));
+            assert!(result_text(&error).contains("runCommand"));
+        }
     }
 
     #[test]
