@@ -76,7 +76,10 @@ db.createUser({
   roles: [{ role: "readWrite", db: "db1" }]
 })`);
 
-  assert.deepEqual(commands.map(({ command }) => command.kind), ["use", "createUser"]);
+  assert.deepEqual(
+    commands.map(({ command }) => command.kind),
+    ["use", "createUser"],
+  );
   const createUser = commands[1]?.command;
   assert.equal(createUser?.kind, "createUser");
   if (createUser?.kind === "createUser") {
@@ -98,14 +101,7 @@ test("parseMongoRunCommand normalizes one non-empty command document", () => {
     },
   );
 
-  for (const source of [
-    "db.runCommand()",
-    "db.runCommand({})",
-    "db.runCommand('ping')",
-    "db.runCommand({ping: 1}, {readPreference: 'primary'})",
-    "db.runCommand({ping: 1}).valueOf()",
-    "db.runCommand([1, 2, 3])",
-  ]) {
+  for (const source of ["db.runCommand()", "db.runCommand({})", "db.runCommand('ping')", "db.runCommand({ping: 1}, {readPreference: 'primary'})", "db.runCommand({ping: 1}).valueOf()", "db.runCommand([1, 2, 3])"]) {
     assert.equal(parseMongoRunCommand(source), null, source);
   }
 });
@@ -124,7 +120,10 @@ test("splitMongoCommands keeps runCommand after a database switch", () => {
 
 db.runCommand({ ping: 1 })`);
 
-  assert.deepEqual(commands.map(({ command }) => command.kind), ["use", "runCommand"]);
+  assert.deepEqual(
+    commands.map(({ command }) => command.kind),
+    ["use", "runCommand"],
+  );
   const runCommand = commands[1]?.command;
   assert.equal(runCommand?.kind, "runCommand");
   if (runCommand?.kind === "runCommand") {
