@@ -126,6 +126,7 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_METADATA));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_DROP_DATABASE));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_CLONE_COLLECTION));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_RUN_COMMAND));
     }
 
     @Test
@@ -146,6 +147,7 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MULTI_SESSION));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_DROP_DATABASE));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_CLONE_COLLECTION));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_RUN_COMMAND));
     }
 
     @Test
@@ -534,6 +536,67 @@ class MongoAgentTest {
         assertEquals(9, json.get("id").getAsInt());
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
+    void runCommandExecutesTheCommandDocumentAndPreservesNestedExtendedJson() {
+        List<Document> commands = new ArrayList<>();
+        MongoDatabase database = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("runCommand".equals(method.getName())) {
+                    commands.add(new Document((Document) args[0]));
+                    return new Document("ok", 1)
+                        .append("cursor", new Document("firstBatch", List.of(
+                            new Document("_id", new ObjectId("507f1f77bcf86cd799439011"))
+                                .append("counter", 9_007_199_254_740_992L)
+                        )));
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("getDatabase".equals(method.getName())) {
+                    assertEquals("app", args[0]);
+                    return database;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        params.addProperty("command_json", "{\"find\":\"orders\",\"filter\":{\"active\":true}}");
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", 10);
+        request.addProperty("method", "run_command");
+        request.add("params", params);
+
+        JsonObject json = JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+
+        assertFalse(json.has("error"), json.toString());
+        assertEquals(
+            new Document("find", "orders").append("filter", new Document("active", true)),
+            commands.get(0)
+        );
+        JsonObject result = json.getAsJsonObject("result");
+        assertEquals(1, result.get("total").getAsInt());
+        assertEquals(1, result.getAsJsonArray("documents").get(0).getAsJsonObject().get("ok").getAsInt());
+        JsonObject copiedId = result.getAsJsonArray("extended_documents")
+            .get(0).getAsJsonObject()
+            .getAsJsonObject("cursor").getAsJsonArray("firstBatch")
+            .get(0).getAsJsonObject().getAsJsonObject("_id");
+        assertEquals("507f1f77bcf86cd799439011", copiedId.get("$oid").getAsString());
+        JsonObject copiedCounter = result.getAsJsonArray("extended_documents")
+            .get(0).getAsJsonObject()
+            .getAsJsonObject("cursor").getAsJsonArray("firstBatch")
+            .get(0).getAsJsonObject().getAsJsonObject("counter");
+        assertEquals("9007199254740992", copiedCounter.get("$numberLong").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_RUN_COMMAND));
     }
 
     @Test

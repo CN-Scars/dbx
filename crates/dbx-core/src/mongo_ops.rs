@@ -148,6 +148,35 @@ pub async fn mongo_server_version_core(
     }
 }
 
+pub async fn mongo_run_command_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    command_json: &str,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::run_command(client, database, command_json).await,
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoRunCommand) {
+                return Err(
+                    "MongoDB Legacy Agent does not support runCommand; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            client
+                .mongo_run_command(serde_json::json!({
+                    "database": database,
+                    "command_json": command_json,
+                }))
+                .await
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
 pub async fn mongo_collection_stats_core(
     state: &AppState,
     connection_id: &str,
@@ -821,6 +850,10 @@ pub async fn execute_mongo_command_core(
             .await
             .map(|version| scalar_query_result("version", Value::String(version))),
         MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
+        MongoCommand::RunCommand { command_json } => {
+            let result = mongo_run_command_core(state, connection_id, database, command_json).await?;
+            Ok(mongo_documents_query_result(result.documents))
+        }
         MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit } => {
             let limit = bounded_mongo_find_limit(*limit, max_rows);
             let result = mongo_find_documents_without_total_core(
@@ -1342,6 +1375,55 @@ for line in sys.stdin:
         .await;
 
         let error = mongo_drop_database_core(&state, "legacy", "app").await.unwrap_err();
+
+        assert!(error.contains("upgrade or reinstall"), "{error}");
+        assert!(!error.contains("Unknown method"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_run_command_routes_legacy_connections_to_the_agent() {
+        let expected_result = serde_json::json!({
+            "documents": [{"ok": 1, "cursor": {"firstBatch": [{"_id": {"$oid": "507f1f77bcf86cd799439011"}}]}}],
+            "extended_documents": [{"ok": 1, "cursor": {"firstBatch": [{"_id": {"$oid": "507f1f77bcf86cd799439011"}}]}}],
+            "total": 1,
+        });
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "run_command",
+            serde_json::json!({
+                "database": "app",
+                "command_json": "{\"ping\":1}",
+            }),
+            expected_result,
+            &[AgentCapability::MongoRunCommand.as_str()],
+        )
+        .await;
+
+        let result = mongo_run_command_core(&state, "legacy", "app", "{\"ping\":1}").await.unwrap();
+
+        assert_eq!(result.total, 1);
+        assert_eq!(result.documents[0]["ok"], 1);
+        assert_eq!(
+            result.extended_documents.as_ref().unwrap()[0]["cursor"]["firstBatch"][0]["_id"],
+            serde_json::json!({"$oid": "507f1f77bcf86cd799439011"})
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_run_command_requires_an_explicit_legacy_agent_capability() {
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "run_command",
+            serde_json::json!({
+                "database": "app",
+                "command_json": "{\"ping\":1}",
+            }),
+            serde_json::json!({"documents": [{"ok": 1}], "total": 1}),
+            &[],
+        )
+        .await;
+
+        let error = mongo_run_command_core(&state, "legacy", "app", "{\"ping\":1}").await.unwrap_err();
 
         assert!(error.contains("upgrade or reinstall"), "{error}");
         assert!(!error.contains("Unknown method"), "{error}");

@@ -785,6 +785,7 @@ async fn main() {
         .route("/mongo/distinct", post(routes::mongo::distinct))
         .route("/mongo/create-index", post(routes::mongo::create_index))
         .route("/mongo/create-user", post(routes::mongo::create_user))
+        .route("/mongo/run-command", post(routes::mongo::run_command))
         .route("/mongo/drop-indexes", post(routes::mongo::drop_indexes))
         .route("/mongo/insert-document", post(routes::mongo::insert_document))
         .route("/mongo/insert-documents", post(routes::mongo::insert_documents))
