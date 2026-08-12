@@ -5,8 +5,9 @@ edition = "2021"
 license = "Apache-2.0"
 
 [features]
-default = ["duckdb-sidecar", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
+default = ["duckdb-sidecar", "mongo-js-runtime", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-sidecar = []
+mongo-js-runtime = ["dep:rquickjs", "dep:rquickjs-serde"]
 mq-admin = ["dep:rumqttc"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 openapi = ["dep:utoipa"]
@@ -50,6 +51,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 prometheus-parse = "=0.2.5"
 futures = "0.3"
 mongodb = "3.2.5"
+rquickjs = { version = "0.12.2", optional = true }
+rquickjs-serde = { version = "0.6.1", optional = true }
 rumqttc = { version = "0.24", features = ["websocket"], optional = true }
 russh = "0.60"
 pageant = "0.2"
@@ -82,6 +85,12 @@ tempfile = "3"
 
 [target.'cfg(not(all(windows, target_vendor = "win7")))'.dependencies]
 iana-time-zone = "0.1"
+
+[target.'cfg(all(windows, target_vendor = "win7"))'.dependencies]
+# rquickjs-sys ships MSVC bindings for the standard Windows target but not DBX's
+# custom Win7 vendor triple. Generate equivalent bindings on the Win7 release
+# runner instead of enabling bindgen for every supported platform.
+rquickjs = { version = "0.12.2", features = ["bindgen"], optional = true }
 
 [dev-dependencies]
 mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
