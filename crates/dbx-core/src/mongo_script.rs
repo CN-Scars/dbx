@@ -17,6 +17,7 @@ use crate::mongo_shell::{
     apply_mongo_find_cursor, build_mongo_collection_command, build_mongo_database_command,
     build_mongo_find_explain_command, MongoCollectionMethod, MongoDatabaseMethod, MongoFindCursor,
 };
+use crate::query_cancel::RunningTaskMetadata;
 use crate::types::QueryResult;
 
 const DEFAULT_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
@@ -305,6 +306,8 @@ pub struct MongoScriptRequest {
     pub max_rows: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub dangerous_operation_confirmed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -356,6 +359,7 @@ pub enum MongoScriptErrorKind {
     InvalidRequest,
     ResourceLimit,
     Runtime,
+    Safety,
     Serialization,
     Timeout,
 }
@@ -368,6 +372,7 @@ impl MongoScriptErrorKind {
             Self::InvalidRequest => "invalid_request",
             Self::ResourceLimit => "resource_limit",
             Self::Runtime => "runtime",
+            Self::Safety => "safety",
             Self::Serialization => "serialization",
             Self::Timeout => "timeout",
         }
@@ -382,6 +387,7 @@ pub fn mongo_script_error_kind(error: &str) -> Option<MongoScriptErrorKind> {
         "invalid_request" => Some(MongoScriptErrorKind::InvalidRequest),
         "resource_limit" => Some(MongoScriptErrorKind::ResourceLimit),
         "runtime" => Some(MongoScriptErrorKind::Runtime),
+        "safety" => Some(MongoScriptErrorKind::Safety),
         "serialization" => Some(MongoScriptErrorKind::Serialization),
         "timeout" => Some(MongoScriptErrorKind::Timeout),
         _ => None,
@@ -504,6 +510,44 @@ pub async fn execute_mongo_script_core(
         max_rows: request.max_rows,
     });
     execute_mongo_script(request, limits, host, cancellation).await
+}
+
+/// Execute one user-confirmed MongoDB shell script under the shared query
+/// cancellation and connection safety policies used by both transports.
+pub async fn execute_mongo_script_managed_core(
+    state: Arc<AppState>,
+    request: MongoScriptRequest,
+    limits: MongoScriptLimits,
+) -> Result<MongoScriptResult, String> {
+    if !request.dangerous_operation_confirmed {
+        return Err(script_error(
+            MongoScriptErrorKind::Safety,
+            "MongoDB shell JavaScript requires explicit dangerous-operation confirmation",
+        ));
+    }
+    if let Some(name) = crate::query::connection_readonly_name(&state, &request.connection_id).await {
+        return Err(script_error(
+            MongoScriptErrorKind::Safety,
+            format!(
+                "Read-only mode: connection '{name}' has read-only protection enabled. Run MongoDB shell JavaScript blocked."
+            ),
+        ));
+    }
+
+    let registered =
+        request.execution_id.as_ref().filter(|execution_id| !execution_id.trim().is_empty()).map(|execution_id| {
+            state.running_queries.register_task(
+                execution_id.clone(),
+                RunningTaskMetadata::query(request.connection_id.clone(), request.database.clone(), None),
+            )
+        });
+    let cancellation = registered.as_ref().map(|query| query.token()).unwrap_or_default();
+    if let Some(execution_id) = request.execution_id.as_ref().filter(|execution_id| !execution_id.trim().is_empty()) {
+        let runtime_cancellation = cancellation.clone();
+        state.running_queries.register_interrupt(execution_id, move || runtime_cancellation.cancel());
+    }
+
+    execute_mongo_script_core(state, request, limits, cancellation).await
 }
 
 fn mongo_command_result_value(

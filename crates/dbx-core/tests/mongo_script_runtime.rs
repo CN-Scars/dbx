@@ -6,11 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use dbx_core::connection::AppState;
+use dbx_core::models::connection::ConnectionConfig;
 use dbx_core::mongo_script::{
-    execute_mongo_script, mongo_script_error_kind, MongoScriptErrorKind, MongoScriptHost, MongoScriptLimits,
-    MongoScriptOperation, MongoScriptOutput, MongoScriptRequest,
+    execute_mongo_script, execute_mongo_script_managed_core, mongo_script_error_kind, MongoScriptErrorKind,
+    MongoScriptHost, MongoScriptLimits, MongoScriptOperation, MongoScriptOutput, MongoScriptRequest, MongoScriptResult,
 };
 use dbx_core::mongo_shell::{MongoCollectionMethod, MongoDatabaseMethod};
+use dbx_core::storage::Storage;
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -87,6 +90,7 @@ fn request(source: impl Into<String>) -> MongoScriptRequest {
         execution_id: Some("test-execution".to_string()),
         max_rows: 100,
         timeout_secs: None,
+        dangerous_operation_confirmed: true,
     }
 }
 
@@ -98,6 +102,125 @@ async fn execute(source: &str) -> Result<dbx_core::mongo_script::MongoScriptResu
         CancellationToken::new(),
     )
     .await
+}
+
+async fn app_state() -> (Arc<AppState>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new_with_plugin_dir(storage, dir.path().join("plugins")));
+    (state, dir)
+}
+
+#[test]
+fn transport_contract_uses_camel_case_and_preserves_nested_results() {
+    let value = json!({
+        "connectionId": "mongo-1",
+        "database": "app",
+        "source": "printjson({ nested: [1, { ok: true }] });",
+        "executionId": "script-1",
+        "maxRows": 250,
+        "timeoutSecs": 5,
+        "dangerousOperationConfirmed": true
+    });
+    let request: MongoScriptRequest = serde_json::from_value(value).unwrap();
+    assert!(request.dangerous_operation_confirmed);
+    assert_eq!(request.execution_id.as_deref(), Some("script-1"));
+
+    let omitted_confirmation: MongoScriptRequest = serde_json::from_value(json!({
+        "connectionId": "mongo-1",
+        "database": "app",
+        "source": "1 + 1",
+        "maxRows": 250
+    }))
+    .unwrap();
+    assert!(!omitted_confirmation.dangerous_operation_confirmed);
+
+    let serialized = serde_json::to_value(MongoScriptResult {
+        final_value: Some(json!({ "nested": [1, { "ok": true }] })),
+        output: vec![MongoScriptOutput::Json(json!({ "items": [{ "id": 1 }] }))],
+        operation_count: 2,
+        succeeded_operation_count: 2,
+        current_database: "app".to_string(),
+        truncated: false,
+    })
+    .unwrap();
+    assert_eq!(serialized["finalValue"]["nested"][1]["ok"], json!(true));
+    assert_eq!(serialized["output"][0]["kind"], json!("json"));
+    assert_eq!(serialized["succeededOperationCount"], json!(2));
+    assert_eq!(serialized["currentDatabase"], json!("app"));
+}
+
+#[tokio::test]
+async fn managed_execution_requires_confirmation_before_starting_the_runtime() {
+    let (state, _dir) = app_state().await;
+    let mut unconfirmed = request("1 + 1");
+    unconfirmed.dangerous_operation_confirmed = false;
+
+    let error = execute_mongo_script_managed_core(state, unconfirmed, MongoScriptLimits::default()).await.unwrap_err();
+    assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::Safety));
+    assert!(error.contains("requires explicit dangerous-operation confirmation"));
+}
+
+#[tokio::test]
+async fn managed_execution_blocks_read_only_connections_before_starting_the_runtime() {
+    let (state, _dir) = app_state().await;
+    let config: ConnectionConfig = serde_json::from_value(json!({
+        "id": "test-connection",
+        "name": "Read-only MongoDB",
+        "db_type": "mongodb",
+        "host": "localhost",
+        "port": 27017,
+        "username": "tester",
+        "password": "",
+        "database": "initial_database",
+        "read_only": true
+    }))
+    .unwrap();
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let error =
+        execute_mongo_script_managed_core(state, request("1 + 1"), MongoScriptLimits::default()).await.unwrap_err();
+    assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::Safety));
+    assert!(error.contains("Read-only MongoDB"));
+    assert!(error.contains("Run MongoDB shell JavaScript blocked"));
+}
+
+#[tokio::test]
+async fn managed_execution_registers_the_whole_script_once_and_cancels_it() {
+    let (state, _dir) = app_state().await;
+    let execution_id = "managed-script-cancel";
+    let mut script_request = request("while (true) {}");
+    script_request.execution_id = Some(execution_id.to_string());
+    let task_state = state.clone();
+    let task = tokio::spawn(async move {
+        execute_mongo_script_managed_core(task_state, script_request, MongoScriptLimits::default()).await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let diagnostics = state.running_queries.diagnostics();
+            if diagnostics.active_execution_ids == [execution_id]
+                && diagnostics.active_by_connection.get("test-connection") == Some(&1)
+                && diagnostics.interrupt_registrations == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the whole script must be registered exactly once");
+
+    assert!(state.running_queries.cancel(execution_id));
+    let error = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("cancellation must interrupt the managed script")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::Cancelled));
+    let diagnostics = state.running_queries.diagnostics();
+    assert!(diagnostics.active_execution_ids.is_empty());
+    assert_eq!(diagnostics.interrupt_registrations, 0);
 }
 
 #[tokio::test]
