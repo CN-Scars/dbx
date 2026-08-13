@@ -74,7 +74,10 @@ export function mongoScriptResultToQueryResult(result: MongoScriptResult, execut
     rows,
     affected_rows: 0,
     execution_time_ms: executionTimeMs,
-    truncated: result.truncated,
+    // Script output truncation is already represented by the dedicated summary
+    // row above. QueryResult.truncated means a database row set can be paged or
+    // re-queried, which does not apply to discarded script output.
+    truncated: false,
     has_more: false,
   };
 }

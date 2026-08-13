@@ -50,7 +50,7 @@ describe("MongoDB JavaScript editor integration", () => {
       column_types: ["TEXT", "TEXT"],
       affected_rows: 0,
       execution_time_ms: 12,
-      truncated: true,
+      truncated: false,
       has_more: false,
     });
     expect(result.rows).toEqual([
