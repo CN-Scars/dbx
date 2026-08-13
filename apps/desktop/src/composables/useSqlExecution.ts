@@ -25,13 +25,13 @@ import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database"
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution, MultiDbTargetExecutionResult } from "@/types/sqlExecution";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
-import { isMongoScriptSource } from "@/lib/mongo/mongoScript";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 
 interface SqlExecutionOptions {
   openInNewResultTab?: boolean;
   editorViewportRequestId?: number;
+  mongoScriptExecution?: boolean;
   dangerousMongoScriptConfirmed?: boolean;
 }
 
@@ -177,8 +177,12 @@ export function useSqlExecution(deps: {
     return tryExecute(sqlOverride, { openInNewResultTab: true });
   }
 
+  function tryExecuteMongoScript(sqlOverride?: SqlExecutionOverride) {
+    return tryExecute(sqlOverride, { mongoScriptExecution: true });
+  }
+
   async function continueExecute(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
-    if (deps.activeConnection.value?.db_type === "mongodb" && isMongoScriptSource(sql) && options.dangerousMongoScriptConfirmed !== true) {
+    if (options.mongoScriptExecution === true && deps.activeConnection.value?.db_type === "mongodb" && options.dangerousMongoScriptConfirmed !== true) {
       dangerSql.value = sql;
       pendingDangerSql.value = sql;
       pendingDangerKind.value = "mongo-script";
@@ -302,13 +306,14 @@ export function useSqlExecution(deps: {
       deps.onMissingDatabase?.();
       return;
     }
-    const statementCount = executionDatabaseType === "mongodb" && isMongoScriptSource(sql) ? 1 : splitSqlStatementRanges(sql, executionDatabaseType).length;
+    const statementCount = options.mongoScriptExecution === true ? 1 : splitSqlStatementRanges(sql, executionDatabaseType).length;
     deps.activeOutputView.value = statementCount > 1 ? "summary" : "result";
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
     const producedResult = await queryStore.executeCurrentSql(sql, {
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
+      ...(options.mongoScriptExecution ? { mongoScriptExecution: true } : {}),
       ...(options.dangerousMongoScriptConfirmed ? { dangerousMongoScriptConfirmed: true } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
@@ -559,7 +564,7 @@ export function useSqlExecution(deps: {
     await doExecute(sql, sourceOffset, {
       openInNewResultTab,
       editorViewportRequestId,
-      ...(kind === "mongo-script" ? { dangerousMongoScriptConfirmed: true } : {}),
+      ...(kind === "mongo-script" ? { mongoScriptExecution: true, dangerousMongoScriptConfirmed: true } : {}),
     });
   }
 
@@ -611,6 +616,7 @@ export function useSqlExecution(deps: {
     suppressDangerConfirm,
     tryExecute,
     tryExecuteInNewResultTab,
+    tryExecuteMongoScript,
     doExecute,
     cancelActiveExecution,
     tryExplain,

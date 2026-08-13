@@ -1,5 +1,4 @@
 import { normalizeBackendError } from "@/lib/backend/errorUtils";
-import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import type { QueryResult } from "@/types/database";
 
 export interface MongoScriptRequest {
@@ -48,10 +47,6 @@ const MONGO_SCRIPT_ERROR_KEYS: Record<string, string> = {
   serialization: "mongoScript.errorSerialization",
   timeout: "mongoScript.errorTimeout",
 };
-
-export function isMongoScriptSource(source: string): boolean {
-  return source.trim().length > 0 && splitMongoCommandRanges(source).length === 0;
-}
 
 export function mongoScriptResultToQueryResult(result: MongoScriptResult, executionTimeMs: number, labels: MongoScriptResultLabels): QueryResult {
   const rows: QueryResult["rows"] = result.output.map((item) => [item.kind === "text" ? labels.textOutput : labels.jsonOutput, displayMongoScriptValue(item.value)]);

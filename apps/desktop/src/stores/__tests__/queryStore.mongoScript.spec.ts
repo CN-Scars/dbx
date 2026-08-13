@@ -63,7 +63,7 @@ describe("queryStore MongoDB JavaScript integration", () => {
     });
   });
 
-  it("dispatches an unparsed selection as one confirmed script result", async () => {
+  it("dispatches an explicitly requested selection as one confirmed script result", async () => {
     mocks.mongoExecuteScript.mockResolvedValue({
       finalValue: { inserted: 2 },
       output: [{ kind: "text", value: "done" }],
@@ -77,7 +77,7 @@ describe("queryStore MongoDB JavaScript integration", () => {
     const source = "for (let i = 0; i < 2; i += 1) { db.items.insertOne({ index: i }); }";
     const tabId = store.createTab("mongo-1", "app", "Script", "query", undefined, source);
 
-    await store.executeTabSql(tabId, source, { dangerousMongoScriptConfirmed: true, sourceOffset: 12 });
+    await store.executeTabSql(tabId, source, { mongoScriptExecution: true, dangerousMongoScriptConfirmed: true, sourceOffset: 12 });
 
     expect(mocks.mongoExecuteScript).toHaveBeenCalledWith({
       connectionId: "mongo-1",
@@ -99,6 +99,26 @@ describe("queryStore MongoDB JavaScript integration", () => {
       ["Summary", "2 of 2 operations succeeded · current database: archive"],
     ]);
     expect(tab.result).toMatchObject({ sourceStatement: source, sourceFrom: 12, sourceTo: 12 + source.length });
+  });
+
+  it.each([
+    ["misspelled command", "db.items.fnd({})", "Use MongoDB shell-style commands"],
+    ["unsupported command", "db.items.bulkWrite([])", "Use MongoDB shell-style commands"],
+    ["ordinary parser error", "db.items.find({", "MongoDB command has unclosed"],
+  ])("does not enter QuickJS or issue database requests for a %s", async (_label, source, expectedError) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mongo-1", "app", "Invalid command", "query", undefined, source);
+
+    await store.executeTabSql(tabId, source);
+
+    expect(mocks.ensureConnected).not.toHaveBeenCalled();
+    expect(mocks.mongoExecuteScript).not.toHaveBeenCalled();
+    expect(mocks.mongoParseShellCommand).not.toHaveBeenCalled();
+    expect(mocks.mongoFindDocuments).not.toHaveBeenCalled();
+    expect(mocks.mongoRunCommand).not.toHaveBeenCalled();
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(String(tab.result?.rows?.[0]?.[0])).toContain(expectedError);
   });
 
   it("preserves find pagination and editable-result metadata on the command path", async () => {

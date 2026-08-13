@@ -3595,7 +3595,7 @@ export const useQueryStore = defineStore("query", () => {
     await executeCurrentSql(tab.sql);
   }
 
-  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; dangerousMongoScriptConfirmed?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
+  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; mongoScriptExecution?: boolean; dangerousMongoScriptConfirmed?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
     const executionTabId = activeTabId.value;
     if (!executionTabId) return;
     const tab = tabs.value.find((item) => item.id === executionTabId);
@@ -4337,6 +4337,7 @@ export const useQueryStore = defineStore("query", () => {
       preserveActiveResultIndex?: boolean;
       replaceActiveResultInGroup?: boolean;
       skipRedisSafetyCheck?: boolean;
+      mongoScriptExecution?: boolean;
       dangerousMongoScriptConfirmed?: boolean;
       sourceOffset?: number;
       sourceTraceId?: string;
@@ -4454,12 +4455,18 @@ export const useQueryStore = defineStore("query", () => {
       const executionTarget = resumedExecutionTarget ?? options?.executionTarget;
       const usesExternalExecutionTarget = !!executionTarget;
       let conn = connStore.getConfig(executionConnectionId);
-      const parsedMongoCommands = conn?.db_type === "mongodb" ? splitMongoCommandRanges(sql) : undefined;
+      const mongoScriptRequested = options?.mongoScriptExecution === true;
+      const parsedMongoCommands = conn?.db_type === "mongodb" && !mongoScriptRequested ? splitMongoCommandRanges(sql) : undefined;
       let mongoCommands = parsedMongoCommands ?? [];
       const mongoNeedsConnection = mongoCommands.some(({ command }) => command.kind !== "use");
 
       if (options?.skipEnsureConnected) {
         queryExecutionLog("info", "ensure-connected:skip", { traceId, elapsed: elapsed(), reason: "caller" });
+      } else if (conn?.db_type === "mongodb" && !mongoScriptRequested && mongoCommands.length === 0 && sql.trim()) {
+        // Keep ordinary parser failures local. In particular, never ensure a
+        // connection (or enter QuickJS) merely because the command parser
+        // rejected malformed or unsupported input.
+        throw new Error(describeMongoCommandParseFailure(sql));
       } else if (conn?.db_type === "mongodb" && mongoCommands.length > 0 && !mongoNeedsConnection) {
         queryExecutionLog("info", "ensure-connected:skip", { traceId, elapsed: elapsed(), reason: "mongo-use-only" });
       } else {
@@ -4468,8 +4475,14 @@ export const useQueryStore = defineStore("query", () => {
         queryExecutionLog("info", "ensure-connected:done", { traceId, elapsed: elapsed() });
       }
       conn = connStore.getConfig(executionConnectionId);
-      if (parsedMongoCommands === undefined && conn?.db_type === "mongodb") {
+      if (mongoScriptRequested && conn?.db_type !== "mongodb") {
+        throw new Error("MongoDB JavaScript execution requires a MongoDB connection.");
+      }
+      if (!mongoScriptRequested && parsedMongoCommands === undefined && conn?.db_type === "mongodb") {
         mongoCommands = splitMongoCommandRanges(sql);
+      }
+      if (conn?.db_type === "mongodb" && !mongoScriptRequested && mongoCommands.length === 0 && sql.trim()) {
+        throw new Error(describeMongoCommandParseFailure(sql));
       }
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       const targetContext = options?.targetContext;
@@ -4484,7 +4497,7 @@ export const useQueryStore = defineStore("query", () => {
       const executionDatabase = dataTabExecutionDatabase(conn, targetDatabase, executionCatalog);
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
-      const isMongoScriptExecution = conn?.db_type === "mongodb" && mongoCommands.length === 0 && sql.trim().length > 0;
+      const isMongoScriptExecution = conn?.db_type === "mongodb" && mongoScriptRequested;
       if (!batchResume) {
         const statementExecution =
           tab.mode === "query" && !isMongoScriptExecution

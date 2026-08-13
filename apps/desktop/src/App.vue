@@ -405,6 +405,7 @@ const {
   suppressDangerConfirm,
   tryExecute,
   tryExecuteInNewResultTab,
+  tryExecuteMongoScript,
   doExecute,
   cancelActiveExecution,
   tryExplain,
@@ -438,6 +439,11 @@ function requestActiveEditorExecute() {
 function requestActiveEditorExecuteInNewResultTab() {
   if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.()) return;
   void tryExecuteInNewResultTab();
+}
+
+function requestActiveEditorExecuteMongoScript() {
+  if (contentAreaRef.value?.requestQueryEditorExecuteMongoScript?.()) return;
+  void tryExecuteMongoScript(activeTab.value?.sql);
 }
 
 const multiExecuteDatabaseType = ref<DatabaseType>();
@@ -2957,6 +2963,7 @@ onUnmounted(() => {
                   @rollback="activeTab && queryStore.rollbackTransaction(activeTab.id)"
                   @dismiss-txn-rolled-back="activeTab && (activeTab.txnAutoRolledBack = false)"
                   @execute="requestActiveEditorExecute()"
+                  @execute-mongo-script="requestActiveEditorExecuteMongoScript()"
                   @multi-execute="requestMultiDbExecute()"
                   @cancel="cancelActiveExecution()"
                   @explain="tryExplain()"
@@ -2992,6 +2999,7 @@ onUnmounted(() => {
                     @send-selection-to-ai="sendSelectionToAi"
                     @execute="tryExecute($event)"
                     @execute-in-new-result-tab="tryExecuteInNewResultTab($event)"
+                    @execute-mongo-script="tryExecuteMongoScript($event)"
                     @cancel="cancelActiveExecution()"
                     @explain="tryExplain()"
                     @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"

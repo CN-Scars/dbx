@@ -1070,7 +1070,7 @@ SELECT @value AS Message;`;
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, {});
   });
 
-  it("confirms an entire MongoDB script once and preserves new-result intent", async () => {
+  it("only confirms MongoDB JavaScript after the explicit script action", async () => {
     const sql = "for (let i = 0; i < 2; i += 1) {\n  db.items.insertOne({ index: i });\n}";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mongodb"));
@@ -1088,7 +1088,13 @@ SELECT @value AS Message;`;
       activeOutputView,
     });
 
-    await execution.tryExecuteInNewResultTab();
+    await execution.tryExecute();
+
+    expect(execution.showDangerDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, {});
+
+    executeCurrentSql.mockClear();
+    await execution.tryExecuteMongoScript();
 
     expect(execution.showDangerDialog.value).toBe(true);
     expect(execution.pendingDangerSql.value).toBe(sql);
@@ -1097,7 +1103,7 @@ SELECT @value AS Message;`;
 
     await execution.onDangerConfirm();
 
-    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { dangerousMongoScriptConfirmed: true, openInNewResultTab: true });
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { mongoScriptExecution: true, dangerousMongoScriptConfirmed: true });
     expect(activeOutputView.value).toBe("result");
   });
 

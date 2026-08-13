@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isMongoScriptSource, mongoScriptResultToQueryResult, translateMongoScriptError, type MongoScriptResultLabels } from "@/lib/mongo/mongoScript";
+import { mongoScriptResultToQueryResult, translateMongoScriptError, type MongoScriptResultLabels } from "@/lib/mongo/mongoScript";
 
 const labels: MongoScriptResultLabels = {
   typeColumn: "Output",
@@ -13,21 +13,6 @@ const labels: MongoScriptResultLabels = {
 };
 
 describe("MongoDB JavaScript editor integration", () => {
-  it("keeps supported commands and batches on the command path", () => {
-    expect(isMongoScriptSource("db.items.find({ active: true }).limit(10)")).toBe(false);
-    expect(isMongoScriptSource("use admin; db.runCommand({ ping: 1 })")).toBe(false);
-  });
-
-  it("classifies JavaScript control flow as one script", () => {
-    expect(
-      isMongoScriptSource(`
-        for (let i = 0; i < 3; i += 1) {
-          db.items.insertOne({ index: i });
-        }
-      `),
-    ).toBe(true);
-  });
-
   it("maps bounded output, nested final values, summary, and truncation into one result", () => {
     const result = mongoScriptResultToQueryResult(
       {

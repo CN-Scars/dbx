@@ -204,6 +204,7 @@ const emit = defineEmits<{
   formatError: [message: string];
   execute: [source: SqlExecutionOverride];
   executeInNewResultTab: [source: SqlExecutionOverride];
+  executeMongoScript: [source: SqlExecutionOverride];
   exportQuery: [payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }];
   save: [];
   clickTable: [target: SqlObjectNavigationTarget];
@@ -849,6 +850,20 @@ function requestExecute(options: RequestExecuteOptions = {}) {
 
 function requestExecuteInNewResultTab() {
   return requestExecute({ bypassPicker: true, openInNewResultTab: true });
+}
+
+function requestExecuteMongoScript() {
+  const currentView = view.value;
+  if (!currentView) return false;
+  currentView.focus();
+  const selection = currentView.state.selection.main;
+  if (!selection.empty) {
+    emit("executeMongoScript", sqlExecutionSnapshotFromView(currentView));
+    return true;
+  }
+  const sql = currentView.state.doc.toString();
+  emit("executeMongoScript", sqlExecutionSnapshotForRange(currentView, { sql, from: 0, to: sql.length }));
+  return true;
 }
 
 function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, options: RequestExecuteOptions = {}) {
@@ -6008,6 +6023,7 @@ defineExpose({
   acceptGutterExecutionViewport,
   requestExecute,
   requestExecuteInNewResultTab,
+  requestExecuteMongoScript,
   pasteClipboardAsSqlInCondition,
   focusStatementRange,
   previewStatementRange,
