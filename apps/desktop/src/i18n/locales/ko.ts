@@ -2172,6 +2172,7 @@ export default withEnglishFallback({
     executeSql: "SQL 실행",
     tempRunSql: "편집기를 수정하지 않고 실행",
     copyAll: "모두 복사",
+    copyMessage: "메시지 복사",
     copied: "복사했습니다",
     copyTestResult: "테스트 결과 복사",
     testErrorAuth: "인증 또는 접근에 실패했습니다. API 키, 프로젝트 권한 및 API 가용성을 확인하세요.",

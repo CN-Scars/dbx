@@ -2354,6 +2354,7 @@ export default withEnglishFallback({
     executeSql: "Executar SQL",
     tempRunSql: "Executar sem modificar",
     copyAll: "Copiar Tudo",
+    copyMessage: "Copiar mensagem",
     copied: "Copiado",
     copyTestResult: "Copiar resultado do teste",
     testErrorAuth: "A autenticação ou o acesso falhou. Verifique a chave de API, as permissões do projeto e se a API está ativada.",

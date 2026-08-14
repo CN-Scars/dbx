@@ -2238,6 +2238,7 @@ export default withEnglishFallback({
     executeSql: "立即执行",
     tempRunSql: "临时运行",
     copyAll: "复制全部",
+    copyMessage: "复制消息",
     copied: "已复制",
     copyTestResult: "复制测试结果",
     testErrorAuth: "身份验证或访问失败，请检查 API Key、项目权限和 API 启用状态。",

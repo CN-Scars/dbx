@@ -2314,6 +2314,7 @@ export default {
     executeSql: "Execute SQL",
     tempRunSql: "Run without modifying editor",
     copyAll: "Copy All",
+    copyMessage: "Copy message",
     copied: "Copied",
     copyTestResult: "Copy test result",
     testErrorAuth: "Authentication or access failed. Check the API key, project permissions, and API availability.",

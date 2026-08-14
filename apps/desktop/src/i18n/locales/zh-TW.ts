@@ -2247,6 +2247,7 @@ export default withEnglishFallback({
     executeSql: "立即執行",
     tempRunSql: "臨時執行",
     copyAll: "複製全部",
+    copyMessage: "複製訊息",
     copied: "已複製",
     copyTestResult: "複製測試結果",
     testErrorAuth: "驗證或存取失敗，請檢查 API Key、專案權限和 API 啟用狀態。",
