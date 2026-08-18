@@ -564,9 +564,10 @@ fn mongo_command_result_value(
         MongoCommand::CollectionStats { metric, .. } if metric == "stats" => {
             Ok(documents.into_iter().next().unwrap_or(Value::Null))
         }
-        MongoCommand::Find { .. } | MongoCommand::Aggregate { .. } | MongoCommand::GetIndexes { .. } => {
-            Ok(Value::Array(documents))
-        }
+        MongoCommand::ShowDatabases
+        | MongoCommand::Find { .. }
+        | MongoCommand::Aggregate { .. }
+        | MongoCommand::GetIndexes { .. } => Ok(Value::Array(documents)),
         MongoCommand::FindExplain { .. } => Ok(documents.into_iter().next().unwrap_or(Value::Null)),
         MongoCommand::FindOne { .. }
         | MongoCommand::FindOneAndUpdate { .. }
@@ -1117,6 +1118,25 @@ mod tests {
             )
             .unwrap(),
             serde_json::json!("9007199254740992")
+        );
+
+        assert_eq!(
+            mongo_command_result_value(
+                &MongoCommand::ShowDatabases,
+                query_result(
+                    &["name", "sizeOnDisk", "empty"],
+                    vec![
+                        vec![serde_json::json!("admin"), serde_json::json!(40960), serde_json::json!(false)],
+                        vec![serde_json::json!("app"), serde_json::json!(8192), serde_json::json!(true)],
+                    ],
+                    2,
+                ),
+            )
+            .unwrap(),
+            serde_json::json!([
+                { "name": "admin", "sizeOnDisk": 40960, "empty": false },
+                { "name": "app", "sizeOnDisk": 8192, "empty": true },
+            ])
         );
     }
 
