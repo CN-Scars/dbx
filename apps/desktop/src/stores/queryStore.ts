@@ -30,7 +30,7 @@ import {
   splitMongoCommandRanges,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongo/mongoShellCommand";
-import { mongoScriptResultToQueryResult, translateMongoScriptError } from "@/lib/mongo/mongoScript";
+import { clampMongoScriptMaxRows, mongoScriptResultToQueryResult, translateMongoScriptError } from "@/lib/mongo/mongoScript";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
@@ -4524,7 +4524,7 @@ export const useQueryStore = defineStore("query", () => {
           database: executionDatabase,
           source: sql,
           executionId,
-          maxRows: normalizeResultPageSize(settingsStore.editorSettings.pageSize),
+          maxRows: clampMongoScriptMaxRows(normalizeResultPageSize(settingsStore.editorSettings.pageSize)),
           timeoutSecs: queryTimeoutSecs,
           dangerousOperationConfirmed: options?.dangerousMongoScriptConfirmed === true,
         });

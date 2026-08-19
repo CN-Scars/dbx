@@ -2,6 +2,14 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  editorSettings: {
+    autoCalculateTotalRows: false,
+    continueOnErrorOnBatch: false,
+    globalQueryTimeoutSecs: 30,
+    pageSize: 100,
+    queryResultMaxRows: 10_000,
+    queryResultMaxRowsEnabled: true,
+  },
   ensureConnected: vi.fn(),
   getConnectionConfig: vi.fn(),
   mongoExecuteScript: vi.fn(),
@@ -27,14 +35,7 @@ vi.mock("@/stores/connectionStore", () => ({
 
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: {
-      autoCalculateTotalRows: false,
-      continueOnErrorOnBatch: false,
-      globalQueryTimeoutSecs: 30,
-      pageSize: 100,
-      queryResultMaxRows: 10_000,
-      queryResultMaxRowsEnabled: true,
-    },
+    editorSettings: mocks.editorSettings,
   }),
 }));
 
@@ -53,6 +54,7 @@ describe("queryStore MongoDB JavaScript integration", () => {
     vi.unstubAllGlobals();
     installLocalStorage();
     setActivePinia(createPinia());
+    mocks.editorSettings.pageSize = 100;
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.getConnectionConfig.mockReturnValue({
       id: "mongo-1",
@@ -61,6 +63,25 @@ describe("queryStore MongoDB JavaScript integration", () => {
       database: "app",
       query_timeout_secs: 30,
     });
+  });
+
+  it("caps oversized MongoDB script row requests before dispatch", async () => {
+    mocks.editorSettings.pageSize = Number.MAX_SAFE_INTEGER;
+    mocks.mongoExecuteScript.mockResolvedValue({
+      output: [],
+      operationCount: 0,
+      succeededOperationCount: 0,
+      currentDatabase: "app",
+      truncated: false,
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const source = "({ ok: true })";
+    const tabId = store.createTab("mongo-1", "app", "Script", "query", undefined, source);
+
+    await store.executeTabSql(tabId, source, { mongoScriptExecution: true });
+
+    expect(mocks.mongoExecuteScript).toHaveBeenCalledWith(expect.objectContaining({ maxRows: 10_000 }));
   });
 
   it("dispatches an explicitly requested selection as one confirmed script result", async () => {

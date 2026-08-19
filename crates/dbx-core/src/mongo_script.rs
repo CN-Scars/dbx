@@ -17,6 +17,7 @@ use crate::mongo_shell::{
     apply_mongo_find_cursor, build_mongo_collection_command, build_mongo_database_command,
     build_mongo_find_explain_command, MongoCollectionMethod, MongoDatabaseMethod, MongoFindCursor,
 };
+use crate::production_safety::mongo_command_targets_production_database;
 use crate::query_cancel::RunningTaskMetadata;
 use crate::types::QueryResult;
 
@@ -28,6 +29,7 @@ const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_VALUE_DEPTH: usize = 64;
 const DEFAULT_MAX_VALUE_NODES: usize = 100_000;
 const DEFAULT_MAX_VALUE_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_MAX_ROWS: usize = crate::query::MAX_ROWS;
 const DEFAULT_SAFETY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const RAW_HOST_CALL_GLOBAL: &str = "__dbxRawHostCall";
@@ -408,6 +410,7 @@ pub struct MongoScriptLimits {
     pub max_value_depth: usize,
     pub max_value_nodes: usize,
     pub max_value_bytes: usize,
+    pub max_rows: usize,
     pub safety_timeout: Duration,
 }
 
@@ -422,6 +425,7 @@ impl Default for MongoScriptLimits {
             max_value_depth: DEFAULT_MAX_VALUE_DEPTH,
             max_value_nodes: DEFAULT_MAX_VALUE_NODES,
             max_value_bytes: DEFAULT_MAX_VALUE_BYTES,
+            max_rows: DEFAULT_MAX_ROWS,
             safety_timeout: DEFAULT_SAFETY_TIMEOUT,
         }
     }
@@ -438,6 +442,7 @@ impl MongoScriptLimits {
             ("max_value_depth", self.max_value_depth),
             ("max_value_nodes", self.max_value_nodes),
             ("max_value_bytes", self.max_value_bytes),
+            ("max_rows", self.max_rows),
         ];
         if let Some((name, _)) = values.into_iter().find(|(_, value)| *value == 0) {
             return Err(script_error(
@@ -449,6 +454,10 @@ impl MongoScriptLimits {
             return Err(script_error(MongoScriptErrorKind::InvalidRequest, "safety_timeout must be greater than zero"));
         }
         Ok(())
+    }
+
+    fn clamp_max_rows(&self, requested: usize) -> usize {
+        requested.min(self.max_rows)
     }
 }
 
@@ -492,8 +501,26 @@ impl MongoScriptHost for MongoScriptCommandHost {
                 (database, command)
             }
         };
-        let result =
-            execute_mongo_command_core(&self.state, &self.connection_id, &database, &command, self.max_rows).await?;
+        let result = {
+            let config = self.state.configs.read().await.get(&self.connection_id).cloned().ok_or_else(|| {
+                script_error(
+                    MongoScriptErrorKind::Safety,
+                    format!(
+                        "MongoDB shell JavaScript could not verify production safety for connection '{}'",
+                        self.connection_id
+                    ),
+                )
+            })?;
+            if mongo_command_targets_production_database(&config, &database, &command) {
+                return Err(script_error(
+                    MongoScriptErrorKind::Safety,
+                    format!(
+                        "MongoDB shell JavaScript cannot mutate protected production scope from database '{database}'"
+                    ),
+                ));
+            }
+            execute_mongo_command_core(&self.state, &self.connection_id, &database, &command, self.max_rows).await?
+        };
         mongo_command_result_for_script(&command, result)
     }
 }
@@ -504,11 +531,8 @@ pub async fn execute_mongo_script_core(
     limits: MongoScriptLimits,
     cancellation: CancellationToken,
 ) -> Result<MongoScriptResult, String> {
-    let host = Arc::new(MongoScriptCommandHost {
-        state,
-        connection_id: request.connection_id.clone(),
-        max_rows: request.max_rows,
-    });
+    let max_rows = limits.clamp_max_rows(request.max_rows);
+    let host = Arc::new(MongoScriptCommandHost { state, connection_id: request.connection_id.clone(), max_rows });
     execute_mongo_script(request, limits, host, cancellation).await
 }
 
@@ -759,13 +783,13 @@ pub async fn execute_mongo_script(
                 state.interrupt(InterruptReason::Cancelled);
                 drop(operation_rx);
                 let _ = worker.await;
-                return Err(interrupt_error(InterruptReason::Cancelled));
+                return Err(interrupt_error_with_progress(InterruptReason::Cancelled, &state, false));
             }
             _ = tokio::time::sleep_until(deadline) => {
                 state.interrupt(InterruptReason::TimedOut);
                 drop(operation_rx);
                 let _ = worker.await;
-                return Err(interrupt_error(InterruptReason::TimedOut));
+                return Err(interrupt_error_with_progress(InterruptReason::TimedOut, &state, false));
             }
             worker_result = &mut worker => {
                 return finish_worker(
@@ -783,24 +807,27 @@ pub async fn execute_mongo_script(
                 let operation = host_request.operation.clone();
                 let mut interrupted = None;
                 let host_result = tokio::select! {
-                    result = host.execute(host_request.operation) => result.and_then(|value| {
-                        validate_json_value(&value, &limits)?;
-                        Ok(value)
-                    }),
+                    biased;
+                    result = host.execute(host_request.operation) => match result {
+                        Ok(value) => {
+                            state.succeeded_operation_count.fetch_add(1, Ordering::SeqCst);
+                            validate_json_value(&value, &limits).map(|()| value)
+                        }
+                        Err(error) => Err(error),
+                    },
                     _ = cancellation.cancelled() => {
                         state.interrupt(InterruptReason::Cancelled);
                         interrupted = Some(InterruptReason::Cancelled);
-                        Err(interrupt_error(InterruptReason::Cancelled))
+                        Err(interrupt_error_with_progress(InterruptReason::Cancelled, &state, true))
                     }
                     _ = tokio::time::sleep_until(deadline) => {
                         state.interrupt(InterruptReason::TimedOut);
                         interrupted = Some(InterruptReason::TimedOut);
-                        Err(interrupt_error(InterruptReason::TimedOut))
+                        Err(interrupt_error_with_progress(InterruptReason::TimedOut, &state, true))
                     }
                 };
 
                 if host_result.is_ok() {
-                    state.succeeded_operation_count.fetch_add(1, Ordering::SeqCst);
                     if let MongoScriptOperation::SelectDatabase { database } = operation {
                         let mut current = current_database.lock().map_err(|_| {
                             script_error(MongoScriptErrorKind::Runtime, "MongoDB script database state is unavailable")
@@ -813,7 +840,7 @@ pub async fn execute_mongo_script(
                 if let Some(reason) = interrupted {
                     drop(operation_rx);
                     let _ = worker.await;
-                    return Err(interrupt_error(reason));
+                    return Err(interrupt_error_with_progress(reason, &state, true));
                 }
             }
         }
@@ -931,7 +958,7 @@ fn install_host_call(
         let result = response
             .blocking_recv()
             .map_err(|_| Exception::throw_internal(&context, "MongoDB script host response channel closed"))?
-            .map_err(|error| Exception::throw_message(&context, &script_error(MongoScriptErrorKind::Host, error)))?;
+            .map_err(|error| Exception::throw_message(&context, &host_error_for_script(error)))?;
         serde_json::to_string(&result).map_err(|error| {
             Exception::throw_internal(&context, &format!("Could not encode MongoDB host result: {error}"))
         })
@@ -978,7 +1005,7 @@ fn finish_worker(
     let worker_result = worker_result.map_err(|error| {
         script_error(MongoScriptErrorKind::Runtime, format!("JavaScript runtime worker failed: {error}"))
     })?;
-    let worker_result = worker_result.map_err(|error| with_operation_progress(error, state))?;
+    let worker_result = worker_result.map_err(|error| with_operation_progress(error, state, false))?;
     let output = output
         .lock()
         .map_err(|_| script_error(MongoScriptErrorKind::Runtime, "MongoDB script output state is unavailable"))?;
@@ -995,13 +1022,20 @@ fn finish_worker(
     })
 }
 
-fn with_operation_progress(error: String, state: &ExecutionState) -> String {
+fn with_operation_progress(error: String, state: &ExecutionState, unknown_outcome: bool) -> String {
     let attempted = state.operation_count.load(Ordering::SeqCst);
-    if attempted == 0 {
+    if attempted == 0 && !unknown_outcome {
         return error;
     }
     let succeeded = state.succeeded_operation_count.load(Ordering::SeqCst);
-    format!("{error} (MongoDB shell stopped after {succeeded} of {attempted} attempted operations succeeded)")
+    let unknown = if unknown_outcome { "; in-flight operation outcome unknown" } else { "" };
+    format!(
+        "{error} (MongoDB shell progress: {succeeded} confirmed completed of {attempted} attempted operations{unknown})"
+    )
+}
+
+fn interrupt_error_with_progress(reason: InterruptReason, state: &ExecutionState, unknown_outcome: bool) -> String {
+    with_operation_progress(interrupt_error(reason), state, unknown_outcome)
 }
 
 fn interrupt_error(reason: InterruptReason) -> String {
@@ -1014,8 +1048,16 @@ fn interrupt_error(reason: InterruptReason) -> String {
     }
 }
 
+fn host_error_for_script(error: String) -> String {
+    if mongo_script_error_kind(&error).is_some() {
+        error
+    } else {
+        script_error(MongoScriptErrorKind::Host, error)
+    }
+}
+
 fn script_error_from_js(message: String) -> String {
-    for kind in [MongoScriptErrorKind::Host, MongoScriptErrorKind::ResourceLimit] {
+    for kind in [MongoScriptErrorKind::Host, MongoScriptErrorKind::ResourceLimit, MongoScriptErrorKind::Safety] {
         let marker = format!("[mongo_script.{}]", kind.code());
         if let Some(index) = message.find(&marker) {
             return message[index..].to_string();
@@ -1158,5 +1200,16 @@ mod tests {
             mongo_command_result_value(&insert, query_result(&[], Vec::new(), 1)).unwrap(),
             serde_json::json!({ "acknowledged": true, "affectedRows": 1 })
         );
+    }
+
+    #[test]
+    fn script_limits_clamp_client_rows_to_the_server_hard_cap() {
+        let limits = MongoScriptLimits::default();
+        assert_eq!(limits.max_rows, crate::query::MAX_ROWS);
+        assert_eq!(limits.clamp_max_rows(250), 250);
+        assert_eq!(limits.clamp_max_rows(usize::MAX), crate::query::MAX_ROWS);
+
+        let invalid = MongoScriptLimits { max_rows: 0, ..limits };
+        assert!(invalid.validate().unwrap_err().contains("max_rows must be greater than zero"));
     }
 }

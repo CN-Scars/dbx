@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mongoScriptResultToQueryResult, translateMongoScriptError, type MongoScriptResultLabels } from "@/lib/mongo/mongoScript";
+import { clampMongoScriptMaxRows, MAX_MONGO_SCRIPT_ROWS, mongoScriptResultToQueryResult, translateMongoScriptError, type MongoScriptResultLabels } from "@/lib/mongo/mongoScript";
 
 const labels: MongoScriptResultLabels = {
   typeColumn: "Output",
@@ -47,11 +47,22 @@ describe("MongoDB JavaScript editor integration", () => {
     ]);
   });
 
+  it("clamps client-provided row limits to the MongoDB script safety cap", () => {
+    expect(clampMongoScriptMaxRows(250)).toBe(250);
+    expect(clampMongoScriptMaxRows(Number.MAX_SAFE_INTEGER)).toBe(MAX_MONGO_SCRIPT_ROWS);
+    expect(clampMongoScriptMaxRows(Number.POSITIVE_INFINITY)).toBe(MAX_MONGO_SCRIPT_ROWS);
+    expect(clampMongoScriptMaxRows(0)).toBe(1);
+  });
+
   it("localizes typed errors while preserving details and partial progress", () => {
     const t = (key: string, params?: Record<string, unknown>) => (params ? `${key}:${params.succeeded}/${params.attempted}` : key);
 
     expect(translateMongoScriptError(t, "[mongo_script.timeout] MongoDB shell execution timed out")).toBe("mongoScript.errorTimeout\n\nMongoDB shell execution timed out");
+    expect(translateMongoScriptError(t, new Error("[mongo_script.host] duplicate key (MongoDB shell progress: 2 confirmed completed of 3 attempted operations)"))).toBe("mongoScript.errorHost\n\nduplicate key\n\nmongoScript.errorPartialCompletion:2/3");
     expect(translateMongoScriptError(t, new Error("[mongo_script.host] duplicate key (MongoDB shell stopped after 2 of 3 attempted operations succeeded)"))).toBe("mongoScript.errorHost\n\nduplicate key\n\nmongoScript.errorPartialCompletion:2/3");
+    expect(translateMongoScriptError(t, "[mongo_script.cancelled] MongoDB shell execution was cancelled (MongoDB shell progress: 1 confirmed completed of 2 attempted operations; in-flight operation outcome unknown)")).toBe(
+      "mongoScript.errorCancelled\n\nMongoDB shell execution was cancelled\n\nmongoScript.errorPartialCompletion:1/2\n\nmongoScript.errorUnknownOutcome",
+    );
     expect(translateMongoScriptError(t, "[mongo_script.runtime] Unsupported MongoDB collection method: bulkWrite")).toBe("mongoScript.errorUnsupportedApi\n\nUnsupported MongoDB collection method: bulkWrite");
     expect(translateMongoScriptError(t, "[mongo_script.runtime] TypeError: Unsupported MongoDB database method: watch")).toBe("mongoScript.errorUnsupportedApi\n\nTypeError: Unsupported MongoDB database method: watch");
     expect(

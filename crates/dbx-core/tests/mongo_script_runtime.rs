@@ -9,8 +9,9 @@ use async_trait::async_trait;
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::ConnectionConfig;
 use dbx_core::mongo_script::{
-    execute_mongo_script, execute_mongo_script_managed_core, mongo_script_error_kind, MongoScriptErrorKind,
-    MongoScriptHost, MongoScriptLimits, MongoScriptOperation, MongoScriptOutput, MongoScriptRequest, MongoScriptResult,
+    execute_mongo_script, execute_mongo_script_core, execute_mongo_script_managed_core, mongo_script_error_kind,
+    MongoScriptErrorKind, MongoScriptHost, MongoScriptLimits, MongoScriptOperation, MongoScriptOutput,
+    MongoScriptRequest, MongoScriptResult,
 };
 use dbx_core::mongo_shell::{MongoCollectionMethod, MongoDatabaseMethod};
 use dbx_core::storage::Storage;
@@ -74,6 +75,22 @@ struct PendingHost {
     started: Arc<Notify>,
 }
 
+struct PendingAfterSuccessHost {
+    started: Arc<Notify>,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl MongoScriptHost for PendingAfterSuccessHost {
+    async fn execute(&self, _operation: MongoScriptOperation) -> Result<Value, String> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(json!({ "ok": 1 }));
+        }
+        self.started.notify_one();
+        pending::<Result<Value, String>>().await
+    }
+}
+
 #[async_trait]
 impl MongoScriptHost for PendingHost {
     async fn execute(&self, _operation: MongoScriptOperation) -> Result<Value, String> {
@@ -109,6 +126,20 @@ async fn app_state() -> (Arc<AppState>, tempfile::TempDir) {
     let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new_with_plugin_dir(storage, dir.path().join("plugins")));
     (state, dir)
+}
+
+fn mongo_config() -> ConnectionConfig {
+    serde_json::from_value(json!({
+        "id": "test-connection",
+        "name": "MongoDB",
+        "db_type": "mongodb",
+        "host": "localhost",
+        "port": 27017,
+        "username": "tester",
+        "password": "",
+        "database": "initial_database"
+    }))
+    .unwrap()
 }
 
 #[test]
@@ -183,6 +214,57 @@ async fn managed_execution_blocks_read_only_connections_before_starting_the_runt
     assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::Safety));
     assert!(error.contains("Read-only MongoDB"));
     assert!(error.contains("Run MongoDB shell JavaScript blocked"));
+}
+
+#[tokio::test]
+async fn core_host_blocks_production_connection_and_database_writes_before_dispatch() {
+    for (is_production, production_databases, source) in [
+        (true, Vec::new(), r#"db.items.insertOne({ source: "production-connection" });"#),
+        (
+            false,
+            vec!["production".to_string()],
+            r#"
+            db = db.getSiblingDB("production");
+            db.users.deleteMany({});
+            "#,
+        ),
+        (false, vec!["production".to_string()], r#"db.runCommand({ ping: 1 });"#),
+        (false, vec!["production".to_string()], r#"db.createUser({ user: "reader", pwd: "secret", roles: [] });"#),
+    ] {
+        let (state, _dir) = app_state().await;
+        let mut config = mongo_config();
+        config.is_production = is_production;
+        config.production_databases = production_databases;
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let error =
+            execute_mongo_script_core(state, request(source), MongoScriptLimits::default(), CancellationToken::new())
+                .await
+                .unwrap_err();
+        assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::Safety));
+        assert!(error.contains("cannot mutate protected production scope"));
+    }
+}
+
+#[tokio::test]
+async fn core_host_blocks_cross_database_out_and_merge_targets_before_dispatch() {
+    for pipeline in [
+        r#"[{ $out: { db: "production", coll: "copied" } }]"#,
+        r#"[{ $merge: { into: { db: "production", coll: "copied" } } }]"#,
+    ] {
+        let (state, _dir) = app_state().await;
+        let mut config = mongo_config();
+        config.production_databases = vec!["production".to_string()];
+        state.configs.write().await.insert(config.id.clone(), config);
+        let source = format!("db.items.aggregate({pipeline}).toArray();");
+
+        let error =
+            execute_mongo_script_core(state, request(source), MongoScriptLimits::default(), CancellationToken::new())
+                .await
+                .unwrap_err();
+        assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::Safety));
+        assert!(error.contains("cannot mutate protected production scope"));
+    }
 }
 
 #[tokio::test]
@@ -556,6 +638,61 @@ async fn cancellation_releases_a_worker_waiting_for_a_host_call() {
         .unwrap()
         .unwrap_err();
     assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::Cancelled));
+    assert!(error.contains("0 confirmed completed of 1 attempted operations"));
+    assert!(error.contains("in-flight operation outcome unknown"));
+}
+
+#[tokio::test]
+async fn cancellation_reports_confirmed_progress_and_an_unknown_in_flight_outcome() {
+    let started = Arc::new(Notify::new());
+    let cancellation = CancellationToken::new();
+    let task = tokio::spawn(execute_mongo_script(
+        request(
+            r#"
+            db.items.insertOne({ step: 1 });
+            db.items.insertOne({ step: 2 });
+            "#,
+        ),
+        MongoScriptLimits::default(),
+        Arc::new(PendingAfterSuccessHost { started: Arc::clone(&started), calls: AtomicUsize::new(0) }),
+        cancellation.clone(),
+    ));
+
+    started.notified().await;
+    cancellation.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("cancellation must release the in-flight host call")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::Cancelled));
+    assert!(error.contains("1 confirmed completed of 2 attempted operations"));
+    assert!(error.contains("in-flight operation outcome unknown"));
+}
+
+#[tokio::test]
+async fn timeout_reports_confirmed_progress_and_an_unknown_in_flight_outcome() {
+    let limits = MongoScriptLimits { safety_timeout: Duration::from_millis(40), ..MongoScriptLimits::default() };
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        execute_mongo_script(
+            request(
+                r#"
+                db.items.insertOne({ step: 1 });
+                db.items.insertOne({ step: 2 });
+                "#,
+            ),
+            limits,
+            Arc::new(PendingAfterSuccessHost { started: Arc::new(Notify::new()), calls: AtomicUsize::new(0) }),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("timeout must release the in-flight host call")
+    .unwrap_err();
+    assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::Timeout));
+    assert!(error.contains("1 confirmed completed of 2 attempted operations"));
+    assert!(error.contains("in-flight operation outcome unknown"));
 }
 
 #[tokio::test]
@@ -735,7 +872,7 @@ async fn reports_partial_progress_and_rejects_unsupported_facade_methods() {
     .await
     .unwrap_err();
     assert_eq!(mongo_script_error_kind(&partial_error), Some(MongoScriptErrorKind::Host));
-    assert!(partial_error.contains("1 of 2 attempted operations succeeded"));
+    assert!(partial_error.contains("1 confirmed completed of 2 attempted operations"));
 
     let unsupported_error = execute("db.items.bulkWrite([]);").await.unwrap_err();
     assert_eq!(mongo_script_error_kind(&unsupported_error), Some(MongoScriptErrorKind::Runtime));

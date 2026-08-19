@@ -35,7 +35,11 @@ export interface MongoScriptResultLabels {
 
 type MongoScriptErrorTranslate = (key: string, params?: Record<string, unknown>) => string;
 
-const MONGO_SCRIPT_ERROR_PATTERN = /^\[mongo_script\.([a-z_]+)\]\s*([\s\S]*?)(?: \(MongoDB shell stopped after (\d+) of (\d+) attempted operations succeeded\))?$/;
+export const MAX_MONGO_SCRIPT_ROWS = 10_000;
+
+const MONGO_SCRIPT_ERROR_PATTERN = /^\[mongo_script\.([a-z_]+)\]\s*([\s\S]*)$/;
+const MONGO_SCRIPT_PROGRESS_PATTERN = /\s*\(MongoDB shell progress: (\d+) confirmed completed of (\d+) attempted operations(; in-flight operation outcome unknown)?\)$/;
+const LEGACY_MONGO_SCRIPT_PROGRESS_PATTERN = /\s*\(MongoDB shell stopped after (\d+) of (\d+) attempted operations succeeded\)$/;
 
 const MONGO_SCRIPT_ERROR_KEYS: Record<string, string> = {
   cancelled: "mongoScript.errorCancelled",
@@ -77,17 +81,26 @@ export function mongoScriptResultToQueryResult(result: MongoScriptResult, execut
   };
 }
 
+export function clampMongoScriptMaxRows(value: number): number {
+  if (!Number.isFinite(value)) return MAX_MONGO_SCRIPT_ROWS;
+  return Math.min(MAX_MONGO_SCRIPT_ROWS, Math.max(1, Math.trunc(value)));
+}
+
 export function translateMongoScriptError(t: MongoScriptErrorTranslate, error: unknown): string | null {
   const message = mongoScriptErrorMessage(error);
   const match = message.match(MONGO_SCRIPT_ERROR_PATTERN);
   if (!match) return null;
 
-  const [, kind, rawDetail = "", succeeded, attempted] = match;
-  const detail = rawDetail.trim();
+  const [, kind, rawDetail = ""] = match;
+  const progress = rawDetail.match(MONGO_SCRIPT_PROGRESS_PATTERN);
+  const legacyProgress = progress ? null : rawDetail.match(LEGACY_MONGO_SCRIPT_PROGRESS_PATTERN);
+  const progressMatch = progress ?? legacyProgress;
+  const detail = (progressMatch ? rawDetail.slice(0, progressMatch.index) : rawDetail).trim();
   const summaryKey = kind === "runtime" && /Unsupported MongoDB (?:database|collection) method:/.test(detail) ? "mongoScript.errorUnsupportedApi" : MONGO_SCRIPT_ERROR_KEYS[kind ?? ""];
   const summary = summaryKey ? t(summaryKey) : t("mongoScript.errorRuntime");
-  const partial = succeeded !== undefined && attempted !== undefined ? t("mongoScript.errorPartialCompletion", { succeeded: Number(succeeded), attempted: Number(attempted) }) : "";
-  return [summary, detail, partial].filter(Boolean).join("\n\n");
+  const partial = progressMatch ? t("mongoScript.errorPartialCompletion", { succeeded: Number(progressMatch[1]), attempted: Number(progressMatch[2]) }) : "";
+  const unknownOutcome = progress?.[3] ? t("mongoScript.errorUnknownOutcome") : "";
+  return [summary, detail, partial, unknownOutcome].filter(Boolean).join("\n\n");
 }
 
 function mongoScriptErrorMessage(error: unknown): string {
