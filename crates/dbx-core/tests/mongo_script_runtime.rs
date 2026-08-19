@@ -9,9 +9,10 @@ use async_trait::async_trait;
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::ConnectionConfig;
 use dbx_core::mongo_script::{
-    execute_mongo_script, execute_mongo_script_core, execute_mongo_script_managed_core, mongo_script_error_kind,
-    MongoScriptErrorKind, MongoScriptHost, MongoScriptLimits, MongoScriptOperation, MongoScriptOutput,
-    MongoScriptRequest, MongoScriptResult,
+    execute_mongo_script as execute_mongo_script_with_admission, execute_mongo_script_core,
+    execute_mongo_script_managed_core, mongo_script_error_kind, MongoScriptErrorKind, MongoScriptHost,
+    MongoScriptLimits, MongoScriptOperation, MongoScriptOutput, MongoScriptRequest, MongoScriptResult,
+    MongoScriptRuntimeAdmission,
 };
 use dbx_core::mongo_shell::{MongoCollectionMethod, MongoDatabaseMethod};
 use dbx_core::storage::Storage;
@@ -109,6 +110,22 @@ fn request(source: impl Into<String>) -> MongoScriptRequest {
         timeout_secs: None,
         dangerous_operation_confirmed: true,
     }
+}
+
+async fn execute_mongo_script(
+    request: MongoScriptRequest,
+    limits: MongoScriptLimits,
+    host: Arc<dyn MongoScriptHost>,
+    cancellation: CancellationToken,
+) -> Result<MongoScriptResult, String> {
+    execute_mongo_script_with_admission(
+        request,
+        limits,
+        Arc::new(MongoScriptRuntimeAdmission::default()),
+        host,
+        cancellation,
+    )
+    .await
 }
 
 async fn execute(source: &str) -> Result<dbx_core::mongo_script::MongoScriptResult, String> {
@@ -524,6 +541,28 @@ async fn reports_runtime_exceptions_and_invalid_requests() {
 }
 
 #[tokio::test]
+async fn enforces_source_size_as_utf8_bytes_before_runtime_creation() {
+    let limits = MongoScriptLimits { max_source_bytes: 4, ..MongoScriptLimits::default() };
+    let accepted = execute_mongo_script(
+        request("'é'"),
+        limits.clone(),
+        Arc::new(RecordingHost::default()),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted.final_value, Some(json!("é")));
+
+    let host = Arc::new(RecordingHost::default());
+    let error =
+        execute_mongo_script(request("'é'\n"), limits, host.clone(), CancellationToken::new()).await.unwrap_err();
+
+    assert_eq!(mongo_script_error_kind(&error), Some(MongoScriptErrorKind::ResourceLimit));
+    assert!(error.contains("source size limit of 4 bytes exceeded"));
+    assert!(host.operations().is_empty());
+}
+
+#[tokio::test]
 async fn enforces_operation_value_memory_and_stack_limits() {
     let operation_limits = MongoScriptLimits { max_operations: 2, ..MongoScriptLimits::default() };
     let operation_error = execute_mongo_script(
@@ -608,6 +647,154 @@ async fn timeout_interrupts_cpu_only_javascript() {
     .unwrap_err();
 
     assert_eq!(mongo_script_error_kind(&result), Some(MongoScriptErrorKind::Timeout));
+}
+
+#[tokio::test]
+async fn shared_runtime_admission_bounds_the_queue_and_releases_cancelled_waiters() {
+    let admission = Arc::new(MongoScriptRuntimeAdmission::new(1, 1).unwrap());
+    let first_started = Arc::new(Notify::new());
+    let first_cancellation = CancellationToken::new();
+    let first = tokio::spawn(execute_mongo_script_with_admission(
+        request("db.items.findOne({ blocked: true });"),
+        MongoScriptLimits::default(),
+        admission.clone(),
+        Arc::new(PendingHost { started: first_started.clone() }),
+        first_cancellation.clone(),
+    ));
+    first_started.notified().await;
+
+    let queued_cancellation = CancellationToken::new();
+    let mut queued = tokio::spawn(execute_mongo_script_with_admission(
+        request("1 + 1"),
+        MongoScriptLimits::default(),
+        admission.clone(),
+        Arc::new(RecordingHost::default()),
+        queued_cancellation.clone(),
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut queued).await.is_err(),
+        "the second execution must wait behind the active runtime"
+    );
+
+    let overflow = execute_mongo_script_with_admission(
+        request("2 + 2"),
+        MongoScriptLimits::default(),
+        admission.clone(),
+        Arc::new(RecordingHost::default()),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(mongo_script_error_kind(&overflow), Some(MongoScriptErrorKind::ResourceLimit));
+    assert!(overflow.contains("execution queue is full (max 1)"));
+
+    queued_cancellation.cancel();
+    let queued_error = tokio::time::timeout(Duration::from_secs(2), queued)
+        .await
+        .expect("queue cancellation must return promptly")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(mongo_script_error_kind(&queued_error), Some(MongoScriptErrorKind::Cancelled));
+    assert!(queued_error.contains("MongoDB shell execution cancelled"));
+
+    let replacement = tokio::spawn(execute_mongo_script_with_admission(
+        request("3 + 4"),
+        MongoScriptLimits::default(),
+        admission,
+        Arc::new(RecordingHost::default()),
+        CancellationToken::new(),
+    ));
+    first_cancellation.cancel();
+    let first_error = tokio::time::timeout(Duration::from_secs(2), first)
+        .await
+        .expect("active runtime cancellation must return promptly")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(mongo_script_error_kind(&first_error), Some(MongoScriptErrorKind::Cancelled));
+
+    let replacement_result = tokio::time::timeout(Duration::from_secs(2), replacement)
+        .await
+        .expect("released permits must admit the replacement execution")
+        .unwrap()
+        .unwrap();
+    assert_eq!(replacement_result.final_value, Some(json!(7)));
+}
+
+#[tokio::test]
+async fn queued_runtime_uses_the_same_deadline_and_releases_its_permit_on_timeout() {
+    let admission = Arc::new(MongoScriptRuntimeAdmission::new(1, 1).unwrap());
+    let first_started = Arc::new(Notify::new());
+    let first_cancellation = CancellationToken::new();
+    let first = tokio::spawn(execute_mongo_script_with_admission(
+        request("db.items.findOne({ blocked: true });"),
+        MongoScriptLimits::default(),
+        admission.clone(),
+        Arc::new(PendingHost { started: first_started.clone() }),
+        first_cancellation.clone(),
+    ));
+    first_started.notified().await;
+
+    let queued_host = Arc::new(RecordingHost::default());
+    let limits = MongoScriptLimits { safety_timeout: Duration::from_millis(40), ..MongoScriptLimits::default() };
+    let timeout_error = execute_mongo_script_with_admission(
+        request("6 * 7"),
+        limits,
+        admission.clone(),
+        queued_host.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(mongo_script_error_kind(&timeout_error), Some(MongoScriptErrorKind::Timeout));
+    assert!(timeout_error.contains("MongoDB shell execution timed out"));
+    assert!(queued_host.operations().is_empty());
+
+    let replacement = tokio::spawn(execute_mongo_script_with_admission(
+        request("6 * 7"),
+        MongoScriptLimits::default(),
+        admission,
+        Arc::new(RecordingHost::default()),
+        CancellationToken::new(),
+    ));
+    first_cancellation.cancel();
+    let _first_error = tokio::time::timeout(Duration::from_secs(2), first)
+        .await
+        .expect("active runtime cancellation must return promptly")
+        .unwrap()
+        .unwrap_err();
+
+    let replacement_result = tokio::time::timeout(Duration::from_secs(2), replacement)
+        .await
+        .expect("queue timeout must release its permit")
+        .unwrap()
+        .unwrap();
+    assert_eq!(replacement_result.final_value, Some(json!(42)));
+}
+
+#[tokio::test]
+async fn shared_runtime_admission_releases_permits_after_runtime_errors() {
+    let admission = Arc::new(MongoScriptRuntimeAdmission::new(1, 1).unwrap());
+    let runtime_error = execute_mongo_script_with_admission(
+        request("throw new Error('expected runtime failure');"),
+        MongoScriptLimits::default(),
+        admission.clone(),
+        Arc::new(RecordingHost::default()),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(mongo_script_error_kind(&runtime_error), Some(MongoScriptErrorKind::Runtime));
+
+    let result = execute_mongo_script_with_admission(
+        request("6 * 7"),
+        MongoScriptLimits::default(),
+        admission,
+        Arc::new(RecordingHost::default()),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.final_value, Some(json!(42)));
 }
 
 #[tokio::test]

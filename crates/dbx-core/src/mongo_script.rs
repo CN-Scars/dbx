@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use rquickjs::{CatchResultExt, Context, Ctx, Exception, Function, Runtime, Value as JsValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +23,7 @@ use crate::types::QueryResult;
 
 const DEFAULT_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_STACK_LIMIT_BYTES: usize = 512 * 1024;
+const DEFAULT_MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_OPERATIONS: usize = 10_000;
 const DEFAULT_MAX_OUTPUT_ITEMS: usize = 1_000;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -31,6 +32,8 @@ const DEFAULT_MAX_VALUE_NODES: usize = 100_000;
 const DEFAULT_MAX_VALUE_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_MAX_ROWS: usize = crate::query::MAX_ROWS;
 const DEFAULT_SAFETY_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_CONCURRENT_RUNTIMES: usize = 2;
+const DEFAULT_MAX_QUEUED_RUNTIMES: usize = 8;
 
 const RAW_HOST_CALL_GLOBAL: &str = "__dbxRawHostCall";
 const OUTPUT_GLOBAL: &str = "__dbxCaptureOutput";
@@ -402,6 +405,7 @@ fn script_error(kind: MongoScriptErrorKind, message: impl AsRef<str>) -> String 
 
 #[derive(Clone, Debug)]
 pub struct MongoScriptLimits {
+    pub max_source_bytes: usize,
     pub memory_limit_bytes: usize,
     pub stack_limit_bytes: usize,
     pub max_operations: usize,
@@ -417,6 +421,7 @@ pub struct MongoScriptLimits {
 impl Default for MongoScriptLimits {
     fn default() -> Self {
         Self {
+            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
             memory_limit_bytes: DEFAULT_MEMORY_LIMIT_BYTES,
             stack_limit_bytes: DEFAULT_STACK_LIMIT_BYTES,
             max_operations: DEFAULT_MAX_OPERATIONS,
@@ -434,6 +439,7 @@ impl Default for MongoScriptLimits {
 impl MongoScriptLimits {
     fn validate(&self) -> Result<(), String> {
         let values = [
+            ("max_source_bytes", self.max_source_bytes),
             ("memory_limit_bytes", self.memory_limit_bytes),
             ("stack_limit_bytes", self.stack_limit_bytes),
             ("max_operations", self.max_operations),
@@ -459,6 +465,83 @@ impl MongoScriptLimits {
     fn clamp_max_rows(&self, requested: usize) -> usize {
         requested.min(self.max_rows)
     }
+}
+
+#[derive(Clone)]
+pub struct MongoScriptRuntimeAdmission {
+    running: Arc<Semaphore>,
+    admitted: Arc<Semaphore>,
+    max_queued: usize,
+}
+
+impl Default for MongoScriptRuntimeAdmission {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_CONCURRENT_RUNTIMES, DEFAULT_MAX_QUEUED_RUNTIMES)
+            .expect("default MongoDB script admission limits must be positive")
+    }
+}
+
+impl MongoScriptRuntimeAdmission {
+    pub fn new(max_running: usize, max_queued: usize) -> Result<Self, String> {
+        if max_running == 0 {
+            return Err(script_error(MongoScriptErrorKind::InvalidRequest, "max_running must be greater than zero"));
+        }
+        let max_admitted = max_running.checked_add(max_queued).ok_or_else(|| {
+            script_error(MongoScriptErrorKind::InvalidRequest, "MongoDB JavaScript admission capacity is too large")
+        })?;
+        Ok(Self {
+            running: Arc::new(Semaphore::new(max_running)),
+            admitted: Arc::new(Semaphore::new(max_admitted)),
+            max_queued,
+        })
+    }
+
+    async fn acquire(
+        &self,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+        state: &ExecutionState,
+    ) -> Result<MongoScriptRuntimePermit, String> {
+        let admitted = match self.admitted.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits) => {
+                return Err(script_error(
+                    MongoScriptErrorKind::ResourceLimit,
+                    format!("MongoDB JavaScript execution queue is full (max {})", self.max_queued),
+                ));
+            }
+            Err(TryAcquireError::Closed) => {
+                return Err(script_error(
+                    MongoScriptErrorKind::Runtime,
+                    "MongoDB JavaScript execution admission is unavailable",
+                ));
+            }
+        };
+
+        let running = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                state.interrupt(InterruptReason::Cancelled);
+                return Err(interrupt_error_with_progress(InterruptReason::Cancelled, state, false));
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                state.interrupt(InterruptReason::TimedOut);
+                return Err(interrupt_error_with_progress(InterruptReason::TimedOut, state, false));
+            }
+            permit = self.running.clone().acquire_owned() => permit.map_err(|_| {
+                script_error(
+                    MongoScriptErrorKind::Runtime,
+                    "MongoDB JavaScript execution admission is unavailable",
+                )
+            })?,
+        };
+        Ok(MongoScriptRuntimePermit { _running: running, _admitted: admitted })
+    }
+}
+
+struct MongoScriptRuntimePermit {
+    _running: OwnedSemaphorePermit,
+    _admitted: OwnedSemaphorePermit,
 }
 
 #[async_trait]
@@ -532,8 +615,9 @@ pub async fn execute_mongo_script_core(
     cancellation: CancellationToken,
 ) -> Result<MongoScriptResult, String> {
     let max_rows = limits.clamp_max_rows(request.max_rows);
+    let admission = state.mongo_script_admission.clone();
     let host = Arc::new(MongoScriptCommandHost { state, connection_id: request.connection_id.clone(), max_rows });
-    execute_mongo_script(request, limits, host, cancellation).await
+    execute_mongo_script(request, limits, admission, host, cancellation).await
 }
 
 /// Execute one user-confirmed MongoDB shell script under the shared query
@@ -748,6 +832,7 @@ impl Drop for InterruptOnDrop {
 pub async fn execute_mongo_script(
     request: MongoScriptRequest,
     limits: MongoScriptLimits,
+    admission: Arc<MongoScriptRuntimeAdmission>,
     host: Arc<dyn MongoScriptHost>,
     cancellation: CancellationToken,
 ) -> Result<MongoScriptResult, String> {
@@ -762,6 +847,7 @@ pub async fn execute_mongo_script(
     let deadline = Instant::now() + timeout;
     let state = Arc::new(ExecutionState::new());
     let _interrupt_on_drop = InterruptOnDrop(Arc::clone(&state));
+    let _runtime_permit = admission.acquire(&cancellation, deadline, &state).await?;
     let output = Arc::new(Mutex::new(OutputState::default()));
     let current_database = Arc::new(Mutex::new(request.database.clone()));
     let (operation_tx, mut operation_rx) = mpsc::channel::<HostRequest>(1);
@@ -857,6 +943,12 @@ fn validate_request(request: &MongoScriptRequest, limits: &MongoScriptLimits) ->
     }
     if request.source.trim().is_empty() {
         return Err(script_error(MongoScriptErrorKind::InvalidRequest, "source must not be empty"));
+    }
+    if request.source.len() > limits.max_source_bytes {
+        return Err(script_error(
+            MongoScriptErrorKind::ResourceLimit,
+            format!("MongoDB JavaScript source size limit of {} bytes exceeded", limits.max_source_bytes),
+        ));
     }
     if request.max_rows == 0 {
         return Err(script_error(MongoScriptErrorKind::InvalidRequest, "max_rows must be greater than zero"));
