@@ -799,6 +799,12 @@ fn existing_transfer_target_table_name(
     tables.iter().find(|table| table.name.eq_ignore_ascii_case(requested_name)).map(|table| table.name.clone())
 }
 
+const TRANSFER_PROGRESS_CHANNEL_CAPACITY: usize = 16;
+
+fn try_send_transfer_progress(sender: &tokio::sync::mpsc::Sender<TransferProgress>, progress: TransferProgress) {
+    let _ = sender.try_send(progress);
+}
+
 struct AbortTransferTaskOnDrop(tokio::task::AbortHandle);
 
 impl Drop for AbortTransferTaskOnDrop {
@@ -7903,7 +7909,7 @@ where
         .get(&table)
         .map(|foreign_keys| HashMap::from([(table.clone(), foreign_keys.clone())]))
         .unwrap_or_default();
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
 
     let mut task = tokio::spawn(async move {
         let mut task_pending_fk_alters = Vec::new();
@@ -7919,7 +7925,7 @@ where
             &known_foreign_keys,
             &mut task_pending_fk_alters,
             move |progress| {
-                let _ = progress_tx.send(progress);
+                try_send_transfer_progress(&progress_tx, progress);
             },
         )
         .await;
@@ -13070,5 +13076,28 @@ CREATE INDEX items_name_idx ON public.items (id);"#;
 
         assert_eq!(statements.len(), 1);
         assert!(statements[0].starts_with("CREATE TABLE"));
+    }
+
+    #[test]
+    fn transfer_progress_queue_has_bounded_capacity() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
+        for rows_transferred in 0..=TRANSFER_PROGRESS_CHANNEL_CAPACITY {
+            try_send_transfer_progress(
+                &sender,
+                TransferProgress {
+                    transfer_id: "transfer".to_string(),
+                    table: "table".to_string(),
+                    table_index: 0,
+                    total_tables: 1,
+                    rows_transferred: rows_transferred as u64,
+                    total_rows: None,
+                    status: TransferStatus::Running,
+                    error: None,
+                    terminal: false,
+                },
+            );
+        }
+
+        assert_eq!(receiver.len(), TRANSFER_PROGRESS_CHANNEL_CAPACITY);
     }
 }
