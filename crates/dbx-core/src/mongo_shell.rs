@@ -910,6 +910,13 @@ fn read_shell_regex_literal(input: &str, index: usize) -> Result<ShellRegexLiter
         if !option.is_ascii_alphabetic() {
             break;
         }
+        // JS-only regex flags (d/g/v/y) have no server-side meaning for a
+        // stored regex literal — MongoDB's $regex has no global modifier — so
+        // drop them instead of failing the whole command.
+        if matches!(option, 'd' | 'g' | 'v' | 'y') {
+            cursor += option.len_utf8();
+            continue;
+        }
         if !matches!(option, 'i' | 'm' | 's' | 'u') || options.contains(&option) {
             return Err(format!("Unsupported or duplicate MongoDB regex option: {option}"));
         }
@@ -1170,8 +1177,10 @@ fn matching_paren(source: &str, open: usize) -> Option<usize> {
         if ch == '\'' || ch == '"' || ch == '`' {
             quote = Some(ch);
         } else if ch == '/' && is_shell_regex_value_position(source, index) {
-            index = shell_regex_literal_at(source, index).ok()??.end;
-            continue;
+            if let Ok(Some(literal)) = shell_regex_literal_at(source, index) {
+                index = literal.end;
+                continue;
+            }
         } else if ch == '(' {
             depth += 1;
         } else if ch == ')' {
@@ -1481,6 +1490,25 @@ mod tests {
     }
 
     #[test]
+    fn drops_js_only_regex_literal_flags() {
+        let command = parse(r#"db.items.find({ value: /abc/gi })"#).unwrap();
+        let MongoCommand::Find { filter, .. } = command else {
+            panic!("expected find command");
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&filter).unwrap(),
+            serde_json::json!({
+                "value": {
+                    "$regularExpression": {
+                        "pattern": "abc",
+                        "options": "i",
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
     fn ignores_delimiters_inside_mongo_shell_regex_literals() {
         let command = parse(r#"db.items.updateMany({ value: /a\),b/ }, { $set: { matched: true } })"#).unwrap();
         let MongoCommand::Update { filter, many, .. } = command else {
@@ -1529,7 +1557,7 @@ mod tests {
             })
         );
 
-        for source in ["{pattern: /unterminated}", "{pattern: /value/g}", "{pattern: /value/ii}"] {
+        for source in ["{pattern: /unterminated}", "{pattern: /value/ii}", "{pattern: /value/q}"] {
             assert!(normalized_json(source).is_err(), "{source}");
         }
     }

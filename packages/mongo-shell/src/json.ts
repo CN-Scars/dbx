@@ -25,6 +25,10 @@ export function normalizeJsonArgument(value: string): string | null {
 }
 
 const MONGO_REGEX_LITERAL_OPTIONS = new Set(["i", "m", "s", "u"]);
+// JS-only regex flags with no server-side meaning for a stored regex literal
+// (MongoDB's $regex has no global modifier) are dropped instead of failing
+// the whole command.
+const MONGO_REGEX_LITERAL_IGNORED_OPTIONS = new Set(["d", "g", "v", "y"]);
 
 interface MongoRegexLiteral {
   end: number;
@@ -74,9 +78,10 @@ function readMongoRegexLiteral(source: string, index: number): MongoRegexLiteral
   const options: string[] = [];
   while (/[A-Za-z]/.test(source[cursor] ?? "")) {
     const option = source[cursor] ?? "";
+    cursor += 1;
+    if (MONGO_REGEX_LITERAL_IGNORED_OPTIONS.has(option)) continue;
     if (!MONGO_REGEX_LITERAL_OPTIONS.has(option) || options.includes(option)) return null;
     options.push(option);
-    cursor += 1;
   }
   options.sort();
   return { end: cursor, pattern, options: options.join("") };

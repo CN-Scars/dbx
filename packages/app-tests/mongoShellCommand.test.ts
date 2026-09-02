@@ -657,8 +657,23 @@ test("normalizeJsonArgument accepts a regex literal after comments", () => {
   });
 });
 
+test("normalizeJsonArgument drops JS-only regex literal flags", () => {
+  const normalized = normalizeJsonArgument(`{
+    global: /value/g,
+    sticky: /value/yd,
+    verbose: /value/givs
+  }`);
+
+  assert.ok(normalized);
+  assert.deepEqual(JSON.parse(normalized), {
+    global: { $regularExpression: { pattern: "value", options: "" } },
+    sticky: { $regularExpression: { pattern: "value", options: "" } },
+    verbose: { $regularExpression: { pattern: "value", options: "is" } },
+  });
+});
+
 test("normalizeJsonArgument rejects malformed Mongo shell regex literals", () => {
-  for (const source of ["{pattern: /unterminated}", "{pattern: /value/g}", "{pattern: /value/ii}"]) {
+  for (const source of ["{pattern: /unterminated}", "{pattern: /value/ii}", "{pattern: /value/q}"]) {
     assert.equal(normalizeJsonArgument(source), null, source);
   }
 });
