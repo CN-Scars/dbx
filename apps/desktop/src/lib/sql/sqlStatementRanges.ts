@@ -261,6 +261,7 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
 const WITH_MAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]);
 const EXPLAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP"]);
 const CREATE_BODY_KEYWORDS = new Set(["SELECT", "WITH", "BEGIN", "DECLARE"]);
+const STARROCKS_CREATE_MATERIALIZED_VIEW_REFRESH_MODIFIERS = new Set(["ASYNC", "MANUAL", "SCHEDULE", "DEFERRED", "IMMEDIATE"]);
 const INSERT_BODY_KEYWORDS = new Set(["SELECT", "WITH"]);
 const ALTER_BODY_KEYWORDS = new Set(["ADD", "ALTER", "COMMENT", "DROP", "MODIFY", "RENAME", "SET"]);
 const CLICKHOUSE_ALTER_TABLE_HEADER = /^ALTER\s+TABLE\s+(?:(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")\s*\.\s*)?(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")(?:\s+ON\s+CLUSTER\s+(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+"|'(?:''|[^'])+'))?\s*$/i;
@@ -762,6 +763,10 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
       continue;
     }
 
+    if (currentBodyKeyword === "CREATE" && isStarRocksCreateMaterializedViewRefreshContinuation(sql, statement.from, lineStart.from, lineStart.keyword, databaseType, parameterOptions)) {
+      continue;
+    }
+
     if (currentBodyKeyword === "CREATE" && isMysqlCreateTableOptionContinuation(sql, statement.from, lineStart.from, lineStart.keyword, databaseType)) {
       continue;
     }
@@ -1021,6 +1026,14 @@ function isMysqlCreateTableOptionContinuation(sql: string, statementFrom: number
 
   const next = nextNonWhitespaceChar(sql, lineStartFrom + keyword.length);
   return next === "=" || next === "'" || next === '"';
+}
+
+function isStarRocksCreateMaterializedViewRefreshContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
+  if (databaseType !== "starrocks" || keyword !== "REFRESH") return false;
+  if (!startsWithSqlWords(sql, statementFrom, ["CREATE", "MATERIALIZED", "VIEW"], databaseType, parameterOptions)) return false;
+
+  const modifier = nextSqlWord(sql, lineStartFrom + keyword.length, databaseType, parameterOptions);
+  return modifier !== null && STARROCKS_CREATE_MATERIALIZED_VIEW_REFRESH_MODIFIERS.has(modifier);
 }
 
 function isClickHouseAlterTableUpdateContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType): boolean {

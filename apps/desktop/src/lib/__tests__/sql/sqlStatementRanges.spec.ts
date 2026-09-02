@@ -844,6 +844,37 @@ GET /_cat/indices`;
     expect(range?.sql.trim()).toBe("UPDATE users\nSET name = 'a'\nWHERE id = 1");
   });
 
+  it("keeps StarRocks asynchronous materialized-view clauses in the CREATE statement", () => {
+    const createSql = `CREATE MATERIALIZED VIEW mv_monthly_events
+PARTITION BY date_trunc('month', event_time)
+DISTRIBUTED BY RANDOM BUCKETS 1
+REFRESH ASYNC
+AS
+SELECT
+  id,
+  event_time,
+  amount
+FROM base_events`;
+    const sql = `${createSql}\nREFRESH MATERIALIZED VIEW mv_monthly_events;`;
+
+    for (const marker of ["CREATE", "PARTITION", "DISTRIBUTED", "REFRESH ASYNC", "SELECT", "base_events"]) {
+      expect(statementRangeAtCursor(sql, indexOf(sql, marker), "starrocks")?.sql.trim()).toBe(createSql);
+    }
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH MATERIALIZED"), "starrocks")?.sql.trim()).toBe("REFRESH MATERIALIZED VIEW mv_monthly_events");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([createSql, "REFRESH MATERIALIZED VIEW mv_monthly_events"]);
+  });
+
+  it("keeps StarRocks scheduled materialized-view clauses in the CREATE statement", () => {
+    const sql = `CREATE MATERIALIZED VIEW mv_daily_events
+REFRESH SCHEDULE EVERY (INTERVAL 1 DAY)
+AS
+SELECT id FROM base_events`;
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([sql]);
+  });
+
   it("keeps MySQL ALTER TABLE column comments with the column definition", () => {
     const sql =
       "ALTER TABLE `yb_course_order`\n  ADD COLUMN `audit_status` tinyint(4) DEFAULT NULL\n    COMMENT '审核状态：0-待审核，1-已通过，2-已拒绝',\n  ADD COLUMN `close_reason` varchar(30) DEFAULT NULL\n    COMMENT '关闭原因：timeout-超时关闭，cancel-取消关闭，refund-退款关闭',\n  ADD COLUMN `paid_completion_time` datetime DEFAULT NULL\n    COMMENT '订单完成支付(付清)时间 首次全额支付完成时记录，全部退款后不重置';";
