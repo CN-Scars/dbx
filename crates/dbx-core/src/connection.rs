@@ -634,7 +634,10 @@ impl PoolRoutingControl {
         };
         let protects_manual_txn = match agent_client.as_ref() {
             Some(client) if client.uses_shared_runtime() => {
-                let connections = self.connections.read().await.clone();
+                let connections = {
+                    let registry = self.connections.read().await;
+                    registry.pools.clone()
+                };
                 connections.iter().any(|(key, pool)| {
                     is_manual_transaction_pool_key(key)
                         && matches!(pool, PoolKind::Agent(sibling) if client.shares_runtime_with(sibling))
