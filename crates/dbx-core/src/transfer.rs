@@ -4958,11 +4958,10 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
 }
 
 /// Strips inline `CONSTRAINT ... FOREIGN KEY ... REFERENCES ...` lines from a
-/// `CREATE TABLE` statement, fixing up the now-dangling trailing comma on the
-/// preceding line. Dialect-agnostic: relies only on the ` FOREIGN KEY ` clause
-/// text, which both Postgres and MySQL-family `SHOW CREATE TABLE` output share,
-/// and on foreign key constraints always being the last items before the closing
-/// paren (true for both dialects' DDL dumps).
+/// `CREATE TABLE` statement, fixing up a trailing comma only when removing the
+/// foreign key leaves one immediately before the table's closing parenthesis.
+/// Dialect-agnostic: relies only on the definition-line shape shared by Postgres
+/// and MySQL-family DDL dumps.
 ///
 /// Only genuine constraint definition lines match (`CONSTRAINT <name> FOREIGN
 /// KEY (` / bare `FOREIGN KEY (`); a column line whose COMMENT or DEFAULT text
@@ -4973,18 +4972,26 @@ fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
     }
 
     let mut lines: Vec<String> = Vec::new();
+    let mut removed_foreign_key = false;
     for line in statement.lines() {
         if INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE.is_match(line) {
-            if let Some(previous) = lines.last_mut() {
-                let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
-                if previous[..trimmed_len].ends_with(',') {
-                    previous.truncate(trimmed_len - 1);
-                }
-            }
+            removed_foreign_key = true;
             continue;
         }
         lines.push(line.to_string());
     }
+
+    if removed_foreign_key {
+        if let Some(closing_index) = lines.iter().rposition(|line| line.trim_start().starts_with(')')) {
+            if let Some(previous) = lines[..closing_index].iter_mut().rfind(|line| !line.trim().is_empty()) {
+                let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
+                if previous[..trimmed_len].ends_with(',') {
+                    previous.remove(trimmed_len - 1);
+                }
+            }
+        }
+    }
+
     lines.join("\n")
 }
 
@@ -10533,6 +10540,30 @@ mod tests {
         assert_eq!(
             statements,
             vec!["CREATE TABLE \"public\".\"audit_logs\" (\n  \"id\" integer,\n  \"user_id\" integer\n)".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_transfer_ddl_preserves_constraint_after_inline_foreign_key() {
+        let ddl = "CREATE TABLE \"source_7931\".\"dbx_child\" (\n  \"id\" integer NOT NULL,\n  \"parent_id\" integer NOT NULL,\n  \"status\" integer NOT NULL,\n  CONSTRAINT \"dbx_child_parent_fk\" FOREIGN KEY (\"parent_id\") REFERENCES \"source_7931\".\"dbx_parent\"(\"id\"),\n  CONSTRAINT \"dbx_child_status_check\" CHECK (status >= 0)\n);";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
+
+        assert_eq!(
+            statements,
+            vec!["CREATE TABLE \"source_7931\".\"dbx_child\" (\n  \"id\" integer NOT NULL,\n  \"parent_id\" integer NOT NULL,\n  \"status\" integer NOT NULL,\n  CONSTRAINT \"dbx_child_status_check\" CHECK (status >= 0)\n)".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_transfer_ddl_removes_multiple_inline_foreign_keys_without_damaging_retained_items() {
+        let ddl = "CREATE TABLE \"public\".\"assignments\" (\n  \"id\" integer NOT NULL,\n  \"owner_id\" integer NOT NULL,\n  \"reviewer_id\" integer NOT NULL,\n  CONSTRAINT \"assignments_owner_fk\" FOREIGN KEY (\"owner_id\") REFERENCES \"users\"(\"id\"),\n  CONSTRAINT \"assignments_owner_check\" CHECK (owner_id > 0),\n  CONSTRAINT \"assignments_reviewer_fk\" FOREIGN KEY (\"reviewer_id\") REFERENCES \"users\"(\"id\"),\n  CONSTRAINT \"assignments_owner_reviewer_unique\" UNIQUE (\"owner_id\", \"reviewer_id\")\n);";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
+
+        assert_eq!(
+            statements,
+            vec!["CREATE TABLE \"public\".\"assignments\" (\n  \"id\" integer NOT NULL,\n  \"owner_id\" integer NOT NULL,\n  \"reviewer_id\" integer NOT NULL,\n  CONSTRAINT \"assignments_owner_check\" CHECK (owner_id > 0),\n  CONSTRAINT \"assignments_owner_reviewer_unique\" UNIQUE (\"owner_id\", \"reviewer_id\")\n)".to_string()]
         );
     }
 
