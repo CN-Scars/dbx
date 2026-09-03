@@ -2917,6 +2917,25 @@ export const useConnectionStore = defineStore("connection", () => {
     return true;
   }
 
+  // Remote sidebar search temporarily replaces an object group's ordinary
+  // children with a filtered projection. When search expanded a previously
+  // collapsed group, discard that projection on clear instead of letting the
+  // loaded marker make the next user expansion reuse incomplete children.
+  function discardFilteredTreeNodeChildren(nodeId: string): boolean {
+    if (!filteredObjectGroupChildrenIds.has(nodeId)) return false;
+    const node = findNode(treeNodes.value, nodeId);
+    if (!node) {
+      filteredObjectGroupChildrenIds.delete(nodeId);
+      return false;
+    }
+    clearLoadedChildrenCache(nodeId, { deletePersisted: false });
+    treeNodeLoads.invalidatePrefix(nodeId);
+    node.children = [];
+    node.objectCount = undefined;
+    node.isLoading = false;
+    return true;
+  }
+
   function treeNodeInSidebarTree(node: TreeNode): TreeNode | null {
     return findNode(treeNodes.value, node.id);
   }
@@ -8914,6 +8933,7 @@ export const useConnectionStore = defineStore("connection", () => {
     isTreeNodeChildrenLoaded,
     canUseLoadedTreeNodeToggle,
     releaseCollapsedTreeNodeChildren,
+    discardFilteredTreeNodeChildren,
     cancelTreeNodeLoad,
     setBeforeConnectHandler,
     initFromDisk,

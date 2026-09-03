@@ -3244,6 +3244,76 @@ describe("connectionStore metadata loading", () => {
     expect(listTables).toHaveBeenCalledTimes(5);
   });
 
+  it("discards a collapsed remote-search projection so the next expansion reloads the ordinary page", async () => {
+    const listTables = vi.fn((_connectionId: string, _database: string, _schema: string, searchFilter?: string, limit?: number) => {
+      if (searchFilter) {
+        return Promise.resolve([{ name: "zz_late_probe", table_type: "TABLE" as const, comment: null }]);
+      }
+      return Promise.resolve(
+        Array.from({ length: Math.min(limit ?? 1001, 1001) }, (_, index) => ({
+          name: `t_${String(index + 1).padStart(4, "0")}`,
+          table_type: "TABLE" as const,
+          comment: null,
+        })),
+      );
+    });
+    const deleteSchemaCachePrefix = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix,
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 1000;
+
+    const connection = mysqlConnection();
+    const tablesGroup: TreeNode = {
+      id: "mysql-1:app:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [tablesGroup] }];
+
+    store.sidebarSearchQuery = "zz_late_probe";
+    await store.loadObjectGroupChildren(tablesGroup, { force: true });
+
+    expect(listTables).toHaveBeenLastCalledWith(connection.id, "app", "app", "zz_late_probe", SIDEBAR_SEARCH_RESULT_BUDGET, undefined, ["TABLE"]);
+    expect(tablesGroup.children?.map((node) => node.label)).toEqual(["zz_late_probe"]);
+    expect(tablesGroup.objectCount).toBe(1);
+    expect(store.canUseLoadedTreeNodeToggle(tablesGroup)).toBe(true);
+
+    tablesGroup.isExpanded = false;
+    expect(store.discardFilteredTreeNodeChildren(tablesGroup.id)).toBe(true);
+    expect(tablesGroup.children).toEqual([]);
+    expect(tablesGroup.objectCount).toBeUndefined();
+    expect(store.canUseLoadedTreeNodeToggle(tablesGroup)).toBe(false);
+    expect(deleteSchemaCachePrefix).not.toHaveBeenCalled();
+
+    store.sidebarSearchQuery = "";
+    await store.loadObjectGroupChildren(tablesGroup);
+
+    expect(listTables).toHaveBeenLastCalledWith(connection.id, "app", "app", undefined, 1001, 0, ["TABLE"]);
+    expect(tablesGroup.children).toHaveLength(1001);
+    expect(tablesGroup.children?.at(-1)?.type).toBe("load-more");
+  });
+
   it("keeps connection-name matches out of object metadata filters", async () => {
     const listTables = vi.fn((_connectionId: string, _database: string, _schema: string, searchFilter?: string) => Promise.resolve(searchFilter === "orders" || !searchFilter ? [{ name: "orders", table_type: "TABLE" as const, comment: null }] : []));
 
