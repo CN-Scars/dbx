@@ -2252,6 +2252,9 @@ export default withEnglishFallback({
     hideFailureDetails: "Hata ayrıntılarını gizle",
     failureDetailTruncated: "Hata ayrıntıları kısaltıldı",
     failureDetailsOmitted: "Gösterilmeyen {count} ek hata ayrıntısı var",
+    copyFailureDetail: "Hata ayrıntılarını kopyala",
+    failureDetailCopied: "Hata ayrıntıları kopyalandı",
+    failureDetailCopyFailed: "Hata ayrıntıları kopyalanamadı: {message}",
   },
   welcome: {
     title: "Veritabanı Çalışma Alanı",

@@ -2175,6 +2175,9 @@ export default withEnglishFallback({
     hideFailureDetails: "Nascondi dettagli errori",
     failureDetailTruncated: "I dettagli dell'errore sono stati troncati",
     failureDetailsOmitted: "Altri {count} dettagli di errore non sono visualizzati",
+    copyFailureDetail: "Copia dettagli dell'errore",
+    failureDetailCopied: "Dettagli dell'errore copiati",
+    failureDetailCopyFailed: "Impossibile copiare i dettagli dell'errore: {message}",
   },
   welcome: {
     title: "Area di Lavoro Database",

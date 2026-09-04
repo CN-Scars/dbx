@@ -2177,6 +2177,9 @@ export default withEnglishFallback({
     hideFailureDetails: "Ocultar detalles de fallos",
     failureDetailTruncated: "Los detalles del error se han truncado",
     failureDetailsOmitted: "No se muestran {count} detalles de fallos adicionales",
+    copyFailureDetail: "Copiar detalles del fallo",
+    failureDetailCopied: "Detalles del fallo copiados",
+    failureDetailCopyFailed: "No se pudieron copiar los detalles del fallo: {message}",
   },
   welcome: {
     title: "Espacio de trabajo de base de datos",
