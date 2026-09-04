@@ -2807,7 +2807,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
 
 <style scoped>
 .sticky-database-header {
-  background-color: var(--background);
+  background-color: var(--sidebar);
 }
 
 .connection-tree-scroller {
