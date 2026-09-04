@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, shallowRef, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
+import { computed, markRaw, nextTick, ref, shallowRef, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
 import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio, Clock, Copy } from "@lucide/vue";
@@ -113,6 +113,8 @@ const fetchAllLoadedCount = ref(0);
 const rootRef = ref<HTMLElement>();
 const keyPaneRef = ref<HTMLElement>();
 const redisKeyScrollerRef = ref<InstanceType<typeof RecycleScroller> | null>(null);
+let redisKeyScrollRevision = 0;
+let latestRedisKeyScrollAnchor: RedisKeyViewportAnchor | null = null;
 const valueViewerRef = ref<{ focusSearch: () => boolean } | null>(null);
 const commandTerminalRef = ref<HTMLElement>();
 const searchPattern = ref("");
@@ -405,26 +407,59 @@ watch(activeCreateKeyTypeHelp, () => {
 const regularVisibleRows = computed(() => {
   return useFlatKeySearchRows.value ? filteredFlatKeys.value.map((key) => redisKeyToFlatTreeRow(key, props.db)) : flattenVisibleRedisKeyTree(filteredTreeKeys.value, expandedGroupIds.value);
 });
-// Fetch All keeps this raw array identity bound to RecycleScroller. Replacing
-// the prop array makes vue-virtual-scroller slice and inspect every row key;
-// bounded in-place publication plus updateVisibleItems avoids that O(N) turn.
-const fetchAllVisibleRows = shallowRef<RedisKeyTreeRow[]>([]);
+let fetchAllVisibleRowsSource: readonly RedisKeyTreeRow[] = [];
+
+function facadeArrayIndex(property: PropertyKey): number {
+  if (typeof property !== "string" || property === "") return -1;
+  const index = Number(property);
+  return Number.isInteger(index) && index >= 0 && String(index) === property ? index : -1;
+}
+
+// Keep one raw Array-shaped identity bound throughout Fetch All. Array methods
+// such as slice use both indexed reads and `has`, so proxy both operations;
+// switching the complete backing snapshot is then O(1) and cannot expose holes.
+const fetchAllVisibleRowsFacade = markRaw(
+  new Proxy([] as RedisKeyTreeRow[], {
+    get(target, property, receiver) {
+      if (property === "length") return fetchAllVisibleRowsSource.length;
+      const index = facadeArrayIndex(property);
+      return index >= 0 ? fetchAllVisibleRowsSource[index] : Reflect.get(target, property, receiver);
+    },
+    has(target, property) {
+      const index = facadeArrayIndex(property);
+      return index >= 0 ? index < fetchAllVisibleRowsSource.length : Reflect.has(target, property);
+    },
+  }),
+);
+const fetchAllVisibleRows = shallowRef<RedisKeyTreeRow[]>(fetchAllVisibleRowsFacade);
 const fetchAllVisibleRowsActive = ref(false);
 const visibleRows = computed(() => (fetchAllVisibleRowsActive.value ? fetchAllVisibleRows.value : regularVisibleRows.value));
+const redisKeyScrollerRows = fetchAllVisibleRowsFacade;
+
+watch(
+  regularVisibleRows,
+  (rows) => {
+    if (fetchAllVisibleRowsActive.value) return;
+    fetchAllVisibleRowsSource = rows;
+    void nextTick(() => {
+      if (!fetchAllVisibleRowsActive.value && fetchAllVisibleRowsSource === rows) refreshRedisKeyScroller();
+    });
+  },
+  { immediate: true },
+);
 
 function activateFetchAllVisibleRows() {
   if (fetchAllVisibleRowsActive.value) return;
-  // Return the exact currently-bound identity when the override is enabled, so
-  // entering Fetch All does not itself trigger the scroller's items watcher.
-  fetchAllVisibleRows.value = regularVisibleRows.value;
+  fetchAllVisibleRowsSource = regularVisibleRows.value;
   fetchAllVisibleRowsActive.value = true;
 }
 
 function deactivateFetchAllVisibleRows() {
   if (!fetchAllVisibleRowsActive.value) return;
   fetchAllVisibleRowsActive.value = false;
-  fetchAllVisibleRows.value = [];
+  fetchAllVisibleRowsSource = regularVisibleRows.value;
   fetchAllFilteredKeyCount.value = null;
+  refreshRedisKeyScroller();
 }
 
 function rollbackFetchAllPublication() {
@@ -1007,7 +1042,12 @@ async function maybeAutoLoadMoreRedisKeys() {
 
 function onRedisKeyScroll(event: Event) {
   const scroller = event.target;
-  if (!(scroller instanceof HTMLElement) || redisInfiniteScrollFrame) return;
+  if (!(scroller instanceof HTMLElement)) return;
+  if (isFetchingAll.value && fetchAllVisibleRowsActive.value) {
+    redisKeyScrollRevision++;
+    latestRedisKeyScrollAnchor = captureRedisKeyViewportAnchor(redisKeyScrollRevision);
+  }
+  if (redisInfiniteScrollFrame) return;
   redisInfiniteScrollFrame = requestAnimationFrame(() => {
     redisInfiniteScrollFrame = 0;
     const shouldLoad = shouldLoadMoreRedisKeys({
@@ -1032,36 +1072,114 @@ const FETCH_ALL_SCAN_COUNT = 50000;
 const FETCH_ALL_BATCH_ITERATIONS = 8;
 const FETCH_ALL_PUBLISH_CHUNK_SIZE = 25_000;
 
+type RedisKeyViewportAnchor = {
+  rowId: string;
+  rowIndex: number;
+  scrollRevision: number;
+};
+
+type RedisKeyScroller = {
+  getScroll: () => { start: number; end: number };
+  findItemIndex: (offset: number) => number;
+  scrollToItem: (index: number, options?: { align?: "start" | "center" | "end" | "nearest"; smooth?: boolean; offset?: number }) => void;
+  updateVisibleItems?: (itemsChanged: boolean, checkPositionDiff?: boolean) => unknown;
+  $forceUpdate?: () => void;
+};
+
 function yieldForRedisKeyBrowserPaint(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
+function redisKeyScroller(): RedisKeyScroller | null {
+  return redisKeyScrollerRef.value as unknown as RedisKeyScroller | null;
+}
+
+function captureRedisKeyViewportAnchor(scrollRevision = redisKeyScrollRevision): RedisKeyViewportAnchor | null {
+  const scroller = redisKeyScroller();
+  if (!scroller) return null;
+  const rowIndex = scroller.findItemIndex(scroller.getScroll().start);
+  if (!Number.isInteger(rowIndex) || rowIndex < 0) return null;
+  const rowId = fetchAllVisibleRows.value[rowIndex]?.id;
+  return rowId ? { rowId, rowIndex, scrollRevision } : null;
+}
+
 function refreshRedisKeyScroller() {
-  const scroller = redisKeyScrollerRef.value as unknown as { updateVisibleItems?: (force?: boolean) => unknown } | null;
-  // Entries changed in place while the array identity stayed stable. Tell the
+  const scroller = redisKeyScroller();
+  // The facade source changed while its array identity stayed stable. Tell the
   // scroller to invalidate its keyed view pool for the currently rendered
   // range; `false` preserves old key/view mappings and can combine row labels.
-  scroller?.updateVisibleItems?.(true);
+  // The method is public on RecycleScroller, but keep the structural guard for
+  // lightweight renderers (including tests) that do not implement scrolling.
+  if (typeof scroller?.updateVisibleItems === "function") {
+    scroller.updateVisibleItems(true);
+  } else {
+    scroller?.$forceUpdate?.();
+  }
+}
+
+function fetchAllPublicationIsCurrent(requestId: number): boolean {
+  return requestId === searchRequestId && redisBrowserIsActive && !fetchAllStopRequested.value;
+}
+
+async function resolveFetchAllViewportAnchor(rows: readonly RedisKeyTreeRow[], requestId: number): Promise<{ anchor: RedisKeyViewportAnchor; rowIndex: number } | null | undefined> {
+  let anchor = captureRedisKeyViewportAnchor();
+  if (!anchor) return null;
+
+  while (fetchAllPublicationIsCurrent(requestId)) {
+    let rowIndex = -1;
+    let anchorChanged = false;
+    for (let offset = 0; offset < rows.length; offset += FETCH_ALL_PUBLISH_CHUNK_SIZE) {
+      if (!fetchAllPublicationIsCurrent(requestId)) return undefined;
+      const end = Math.min(offset + FETCH_ALL_PUBLISH_CHUNK_SIZE, rows.length);
+      for (let index = offset; index < end; index++) {
+        if (rows[index]?.id === anchor.rowId) {
+          rowIndex = index;
+          break;
+        }
+      }
+      if (rowIndex >= 0) break;
+      if (end < rows.length) await yieldForRedisKeyBrowserPaint();
+      const latest = latestRedisKeyScrollAnchor;
+      if (latest && latest.scrollRevision > anchor.scrollRevision) {
+        anchor = latest;
+        anchorChanged = true;
+        break;
+      }
+    }
+
+    const latest = latestRedisKeyScrollAnchor;
+    if (latest && latest.scrollRevision > anchor.scrollRevision) {
+      anchor = latest;
+      continue;
+    }
+    if (!anchorChanged) return rowIndex >= 0 ? { anchor, rowIndex } : null;
+  }
+  return undefined;
 }
 
 async function publishFetchAllVisibleRows(rows: readonly RedisKeyTreeRow[], requestId: number): Promise<boolean> {
-  const target = fetchAllVisibleRows.value;
-  if (rows.length === 0) {
-    target.length = 0;
+  const anchorResolution = await resolveFetchAllViewportAnchor(rows, requestId);
+  if (anchorResolution === undefined) return false;
+  if (!fetchAllPublicationIsCurrent(requestId)) return false;
+  // The facade stays bound while its complete backing source switches. If an
+  // anchor survived, install the source and reposition before refreshing the
+  // pool in this same browser turn, making the visual handoff atomic.
+  fetchAllVisibleRowsSource = rows;
+  if (anchorResolution) redisKeyScroller()?.scrollToItem(anchorResolution.rowIndex, { align: "start" });
+  refreshRedisKeyScroller();
+  if (anchorResolution) {
+    // updateVisibleItems updates the scroller's reactive total size, but Vue
+    // applies the corresponding spacer height on its next DOM flush. A target
+    // beyond the old list's scroll range is clamped by the browser until that
+    // happens, so repeat the bounded viewport update after nextTick. Both
+    // flushes stay in the same event-loop turn (there is no paint-capable
+    // yield), preserving an atomic visual handoff.
+    await nextTick();
+    if (!fetchAllPublicationIsCurrent(requestId)) return false;
+    redisKeyScroller()?.scrollToItem(anchorResolution.rowIndex, { align: "start" });
     refreshRedisKeyScroller();
-    return requestId === searchRequestId && redisBrowserIsActive && !fetchAllStopRequested.value;
   }
-
-  for (let offset = 0; offset < rows.length; offset += FETCH_ALL_PUBLISH_CHUNK_SIZE) {
-    if (requestId !== searchRequestId || !redisBrowserIsActive || fetchAllStopRequested.value) return false;
-    const end = Math.min(offset + FETCH_ALL_PUBLISH_CHUNK_SIZE, rows.length);
-    for (let index = offset; index < end; index++) target[index] = rows[index];
-    if (end === rows.length) target.length = rows.length;
-    refreshRedisKeyScroller();
-    // Yield only when another bounded publication unit remains.
-    if (end < rows.length) await yieldForRedisKeyBrowserPaint();
-  }
-  return requestId === searchRequestId && redisBrowserIsActive && !fetchAllStopRequested.value;
+  return fetchAllPublicationIsCurrent(requestId);
 }
 
 async function fetchAll(): Promise<boolean> {
@@ -2651,7 +2769,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
           <div v-else-if="noExpiryOnly && visibleRows.length === 0" class="flex-1 flex items-center justify-center text-muted-foreground text-xs p-4 text-center">
             {{ t("redis.noExpiryKeysEmpty") }}
           </div>
-          <RecycleScroller v-else ref="redisKeyScrollerRef" class="redis-key-scroller flex-1" :items="visibleRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id" @scroll="onRedisKeyScroll" @resize="maybeAutoLoadMoreRedisKeys">
+          <RecycleScroller v-else ref="redisKeyScrollerRef" class="redis-key-scroller flex-1" :items="redisKeyScrollerRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id" @scroll="onRedisKeyScroll" @resize="maybeAutoLoadMoreRedisKeys">
             <template #default="{ item: row }">
               <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu, isOpen }">
                 <div
