@@ -44,6 +44,126 @@ const ARCHIVE_EXTRACT_BACKOFF_MS: &[u64] = &[100, 250, 500];
 /// the download server, local disk, or the application's file descriptors.
 const MAX_CONCURRENT_AGENT_UPDATES: usize = 4;
 
+#[derive(Debug, Clone)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum ManagedAgentProcessTarget {
+    Driver { jar_path: PathBuf, native_path: PathBuf },
+    JreDirectory(PathBuf),
+}
+
+impl ManagedAgentProcessTarget {
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn description(&self) -> String {
+        match self {
+            Self::Driver { jar_path, .. } => format!("driver artifact {}", jar_path.display()),
+            Self::JreDirectory(path) => format!("JRE directory {}", path.display()),
+        }
+    }
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn normalized_process_path(path: &Path) -> String {
+    let normalized = path.to_string_lossy().trim_matches('"').replace('/', "\\");
+    normalized.strip_prefix(r"\\?\").unwrap_or(&normalized).trim_end_matches('\\').to_ascii_lowercase()
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn process_path_is_within(candidate: &str, directory: &str) -> bool {
+    candidate == directory || candidate.strip_prefix(directory).is_some_and(|remainder| remainder.starts_with('\\'))
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn process_matches_managed_agent(
+    executable: Option<&Path>,
+    command: &[std::ffi::OsString],
+    target: &ManagedAgentProcessTarget,
+) -> bool {
+    let executable = executable.map(normalized_process_path);
+    match target {
+        ManagedAgentProcessTarget::Driver { jar_path, native_path } => {
+            let jar_path = normalized_process_path(jar_path);
+            let native_path = normalized_process_path(native_path);
+            executable.as_deref() == Some(native_path.as_str())
+                || command.iter().any(|argument| normalized_process_path(Path::new(argument)) == jar_path)
+        }
+        ManagedAgentProcessTarget::JreDirectory(directory) => {
+            let directory = normalized_process_path(directory);
+            executable.as_deref().is_some_and(|path| process_path_is_within(path, &directory))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn stop_external_managed_agent_processes_blocking(target: ManagedAgentProcessTarget) -> Result<(), String> {
+    use sysinfo::{get_current_pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
+
+    let refresh = ProcessRefreshKind::new().with_cmd(UpdateKind::Always).with_exe(UpdateKind::Always);
+    let mut system = System::new_with_specifics(RefreshKind::new().with_processes(refresh));
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+    let current_pid = get_current_pid().ok();
+    let mut matched = Vec::new();
+
+    for (pid, process) in system.processes() {
+        if current_pid == Some(*pid) || !process_matches_managed_agent(process.exe(), process.cmd(), &target) {
+            continue;
+        }
+        let name = process.name().to_string_lossy().into_owned();
+        let sent = process.kill();
+        log::info!(
+            "Stopping external DBX agent process before replacing {}: pid={}, name={}, kill_sent={sent}",
+            target.description(),
+            pid.as_u32(),
+            name
+        );
+        matched.push((*pid, name));
+    }
+
+    if matched.is_empty() {
+        return Ok(());
+    }
+
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+        matched.retain(|(pid, _)| system.process(*pid).is_some());
+        if matched.is_empty() {
+            return Ok(());
+        }
+    }
+
+    let remaining =
+        matched.into_iter().map(|(pid, name)| format!("{name} (PID {})", pid.as_u32())).collect::<Vec<_>>().join(", ");
+    Err(format!("Failed to stop DBX agent process(es) holding {}: {remaining}", target.description()))
+}
+
+async fn stop_external_managed_agent_processes(target: ManagedAgentProcessTarget) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return tokio::task::spawn_blocking(move || stop_external_managed_agent_processes_blocking(target))
+            .await
+            .map_err(|error| format!("Failed to inspect DBX agent processes: {error}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        Ok(())
+    }
+}
+
+async fn stop_driver_processes_before_replacement(am: &AgentManager, db_type: &str) -> Result<(), String> {
+    am.stop_daemon_by_key(db_type).await;
+    stop_external_managed_agent_processes(ManagedAgentProcessTarget::Driver {
+        jar_path: am.driver_jar_path(db_type),
+        native_path: am.driver_native_path(db_type),
+    })
+    .await
+}
+
+async fn stop_jre_processes_before_replacement(am: &AgentManager, jre_key: &str) -> Result<(), String> {
+    stop_daemons_using_jre(am, jre_key).await;
+    stop_external_managed_agent_processes(ManagedAgentProcessTarget::JreDirectory(am.jre_dir(jre_key))).await
+}
+
 /// Delete an old JRE directory, retrying on Windows to cover the daemon-exit
 /// and AV-scan release window. Returns the original `std::io::Error` when all
 /// retries fail so callers can decide whether to fall back to rename-stash.
@@ -984,6 +1104,7 @@ pub async fn uninstall_agent_driver(am: &AgentManager, db_type: &str) -> Result<
     {
         let driver_lock = driver_operation_lock(am, db_type);
         let _driver_guard = driver_lock.lock().await;
+        stop_driver_processes_before_replacement(am, db_type).await?;
         prune_driver_download_cache(am, db_type)?;
         let jar_path = am.driver_jar_path(db_type);
         if jar_path.exists() {
@@ -995,7 +1116,6 @@ pub async fn uninstall_agent_driver(am: &AgentManager, db_type: &str) -> Result<
             }
         }
         am.mutate_state(|state| state.installed_drivers.remove(db_type))?;
-        am.stop_daemon_by_key(db_type).await;
     }
     Ok(())
 }
@@ -1027,6 +1147,7 @@ pub async fn uninstall_agent_jre(am: &AgentManager, jre_key: &str) -> Result<(),
         // Stop daemons first so any java.exe holding the JRE files exits before
         // we try to remove the directory (Windows ERROR_ACCESS_DENIED otherwise).
         am.stop_daemons().await;
+        stop_external_managed_agent_processes(ManagedAgentProcessTarget::JreDirectory(am.jre_dir(jre_key))).await?;
         let jre_dir = am.jre_dir(jre_key);
         if let Err(err) = remove_jre_dir_with_retry(&jre_dir) {
             return Err(format_jre_dir_remove_error(&jre_dir, &err));
@@ -1085,6 +1206,7 @@ pub async fn reinstall_agent_jre_from(
     // handles on Windows (Issue #1100). Falls back to a rename-stash if the
     // directory still cannot be removed.
     am.stop_daemons().await;
+    stop_external_managed_agent_processes(ManagedAgentProcessTarget::JreDirectory(jre_dir.clone())).await?;
     let stash = replace_old_jre_dir(&jre_dir)?;
     persist_pending_jre_cleanup(am, stash.as_ref()).await?;
     extract_jre_archive(&jre_archive, &jre_dir, platform_jre.format)?;
@@ -1293,8 +1415,8 @@ async fn install_agent_driver_with_batch_unlocked(
             // anyway because the same tokens are cancelled).
             if can_fallback_to_local_agent(am, db_type, cancellations).await {
                 if let Some(local_jar) = find_local_agent_jar(db_type) {
+                    stop_driver_processes_before_replacement(am, db_type).await?;
                     install_local_agent(am, db_type, local_jar)?;
-                    am.stop_daemon_by_key(db_type).await;
                     progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
                     return Ok(());
                 }
@@ -1374,7 +1496,7 @@ async fn ensure_jre_from_registry(
     // Stop only daemons that use this JRE before replacing its directory
     // (Windows ERROR_ACCESS_DENIED, Issue #1100).  In a concurrent
     // upgrade-all this avoids killing unrelated daemons mid-install.
-    stop_daemons_using_jre(am, jre_key).await;
+    stop_jre_processes_before_replacement(am, jre_key).await?;
     let stash = replace_old_jre_dir(&jre_dir)?;
 
     // Persist the stash path *before* extraction so that a crash during
@@ -1450,6 +1572,7 @@ async fn commit_local_agent_install(
     jre_key: &str,
     jre_version: Option<&str>,
 ) -> Result<(), String> {
+    stop_driver_processes_before_replacement(am, db_type).await?;
     install_local_agent_file(am, db_type, local_jar)?;
     persist_local_agent_install_state(am, db_type, jre_key, jre_version).await
 }
@@ -1489,7 +1612,6 @@ async fn install_local_agent_with_registry_jre(
         registry.resolve_jre(jre_key).map(|jre| jre.version.as_str()),
     )
     .await?;
-    am.stop_daemon_by_key(db_type).await;
     progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
     Ok(())
 }
@@ -1671,6 +1793,7 @@ async fn install_agent_driver_from_registry(
         std::fs::remove_file(&download_path).ok();
         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
     }
+    stop_driver_processes_before_replacement(am, db_type).await?;
     install_downloaded_driver_artifact(
         &download_path,
         &target_path,
@@ -1712,7 +1835,6 @@ async fn install_agent_driver_from_registry(
             },
         );
     })?;
-    am.stop_daemon_by_key(db_type).await;
     cleanup_driver_download_cache_after_success(am, db_type);
     progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
     Ok(())
@@ -2646,6 +2768,7 @@ async fn import_tar_zstd_jre_package(
     extract_and_validate_standalone_jre(package_path, staging.path(), info)?;
     // Validate before stopping active daemons or replacing a working runtime.
     am.stop_daemons().await;
+    stop_external_managed_agent_processes(ManagedAgentProcessTarget::JreDirectory(am.jre_dir(&info.key))).await?;
     let pending_cleanup = replace_imported_jre_dir(staging.path(), &am.jre_dir(&info.key))?;
     am.mutate_state(|state| {
         state.jre_versions.insert(info.key.clone(), info.version.clone());
@@ -2743,6 +2866,7 @@ async fn import_tar_zstd_driver_package(
         }
         DriverArtifactKind::Native => am.driver_native_path(&info.db_type),
     };
+    stop_driver_processes_before_replacement(am, &info.db_type).await?;
     install_driver_from_tar_zstd_package(
         package_path,
         &target_path,
@@ -2773,7 +2897,6 @@ async fn import_tar_zstd_driver_package(
             );
         })?;
     }
-    am.stop_daemon_by_key(&info.db_type).await;
     result.drivers_installed.push(info.db_type);
     Ok(result)
 }
@@ -2938,7 +3061,8 @@ pub async fn import_offline_zip(
         // A blocked write (anti-virus, disk quota) or an invalid archive must
         // not abort the rest of the package: record the failure and continue so
         // the drivers still install.
-        let outcome = (|| -> Result<(), String> {
+        let jre_dir = am.jre_dir(jre_key);
+        let staged = (|| -> Result<(PathBuf, PathBuf), String> {
             let mut entry = archive
                 .by_name(entry_name)
                 .map_err(|e| format!("Failed to read {entry_name}: {}", describe_error(&e)))?;
@@ -2950,7 +3074,6 @@ pub async fn import_offline_zip(
                     .map_err(|e| format!("Failed to extract JRE archive: {}", describe_error(&e)))?;
             }
 
-            let jre_dir = am.jre_dir(jre_key);
             let staging_dir = am.base_dir().join(format!(".jre-offline-import-{}", uuid::Uuid::new_v4()));
             if let Err(error) = extract_jre_archive(&tmp_archive, &staging_dir, *format) {
                 std::fs::remove_dir_all(&staging_dir).ok();
@@ -2962,17 +3085,30 @@ pub async fn import_offline_zip(
                 std::fs::remove_file(&tmp_archive).ok();
                 return Err(format!("Offline JRE archive does not contain a Java executable: {entry_name}"));
             }
-            let pending_cleanup = replace_imported_jre_dir(&staging_dir, &jre_dir)?;
-            std::fs::remove_file(&tmp_archive).ok();
-            if let Some(path) = pending_cleanup {
-                local_state.pending_jre_cleanup.push(path);
-            }
-
-            if let Some(ver) = jre_version {
-                local_state.jre_versions.insert(jre_key.clone(), ver);
-            }
-            Ok(())
+            Ok((tmp_archive, staging_dir))
         })();
+        let outcome = match staged {
+            Ok((tmp_archive, staging_dir)) => {
+                let result = async {
+                    stop_jre_processes_before_replacement(am, jre_key).await?;
+                    let pending_cleanup = replace_imported_jre_dir(&staging_dir, &jre_dir)?;
+                    if let Some(path) = pending_cleanup {
+                        local_state.pending_jre_cleanup.push(path);
+                    }
+                    if let Some(ver) = jre_version {
+                        local_state.jre_versions.insert(jre_key.clone(), ver);
+                    }
+                    Ok(())
+                }
+                .await;
+                std::fs::remove_file(&tmp_archive).ok();
+                if result.is_err() {
+                    std::fs::remove_dir_all(&staging_dir).ok();
+                }
+                result
+            }
+            Err(error) => Err(error),
+        };
         match outcome {
             Ok(()) => result.jre_installed.push(jre_key.clone()),
             Err(error) => {
@@ -3008,7 +3144,7 @@ pub async fn import_offline_zip(
         let driver_path = if *is_native { am.driver_native_path(db_type) } else { am.driver_jar_path(db_type) };
         // Same per-item isolation as the JRE loop: one unreadable or blocked
         // driver must not stop the remaining drivers from installing.
-        let outcome = (|| -> Result<(), String> {
+        let staged = (|| -> Result<PathBuf, String> {
             if let Some(parent) = driver_path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create driver directory: {}", describe_error(&e)))?;
@@ -3043,24 +3179,41 @@ pub async fn import_offline_zip(
                     return Err(format!("Offline agent jar is invalid or corrupt: {entry_name}"));
                 }
             }
-            replace_imported_agent_file(&staging_path, &driver_path)?;
-            if *is_native {
-                std::fs::remove_file(am.driver_jar_path(db_type)).ok();
-            } else {
-                std::fs::remove_file(am.driver_native_path(db_type)).ok();
-            }
-
-            let version =
-                registry.drivers.get(db_type).map(|d| d.version.clone()).unwrap_or_else(|| "local".to_string());
-            let jre_key =
-                registry.drivers.get(db_type).map(|d| d.jre.clone()).unwrap_or_else(|| DEFAULT_JRE_KEY.to_string());
-
-            local_state.installed_drivers.insert(
-                db_type.clone(),
-                InstalledDriver { version, installed_at: chrono::Utc::now().to_rfc3339(), jre: jre_key },
-            );
-            Ok(())
+            Ok(staging_path)
         })();
+        let outcome = match staged {
+            Ok(staging_path) => {
+                let result = async {
+                    stop_driver_processes_before_replacement(am, db_type).await?;
+                    replace_imported_agent_file(&staging_path, &driver_path)?;
+                    if *is_native {
+                        std::fs::remove_file(am.driver_jar_path(db_type)).ok();
+                    } else {
+                        std::fs::remove_file(am.driver_native_path(db_type)).ok();
+                    }
+
+                    let version =
+                        registry.drivers.get(db_type).map(|d| d.version.clone()).unwrap_or_else(|| "local".to_string());
+                    let jre_key = registry
+                        .drivers
+                        .get(db_type)
+                        .map(|d| d.jre.clone())
+                        .unwrap_or_else(|| DEFAULT_JRE_KEY.to_string());
+
+                    local_state.installed_drivers.insert(
+                        db_type.clone(),
+                        InstalledDriver { version, installed_at: chrono::Utc::now().to_rfc3339(), jre: jre_key },
+                    );
+                    Ok(())
+                }
+                .await;
+                if result.is_err() {
+                    std::fs::remove_file(&staging_path).ok();
+                }
+                result
+            }
+            Err(error) => Err(error),
+        };
         match outcome {
             Ok(()) => result.drivers_installed.push(db_type.clone()),
             Err(error) => {
@@ -3913,6 +4066,8 @@ pub async fn import_agent_driver(am: &AgentManager, db_type: &str, source_path: 
         return Err(format!("File not found: {}", source_path.display()));
     }
 
+    stop_driver_processes_before_replacement(am, db_type).await?;
+
     if source_path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("jar")) {
         install_local_agent(am, db_type, source_path.to_path_buf())?;
         std::fs::remove_file(am.driver_native_path(db_type)).ok();
@@ -4119,6 +4274,50 @@ fn is_windows_binary_for_machine(file: &mut std::fs::File, magic: &[u8; 4], expe
 #[cfg(test)]
 mod agent_download_url_tests {
     use super::*;
+
+    #[test]
+    fn managed_driver_process_matches_jar_argument_or_native_executable() {
+        let target = ManagedAgentProcessTarget::Driver {
+            jar_path: PathBuf::from(r"C:\Users\alice\.dbx\agents\drivers\dameng\agent.jar"),
+            native_path: PathBuf::from(r"C:\Users\alice\.dbx\agents\drivers\dameng\agent.exe"),
+        };
+        let java_command = vec![
+            std::ffi::OsString::from("-jar"),
+            std::ffi::OsString::from(r"c:/users/ALICE/.dbx/agents/drivers/dameng/agent.jar"),
+        ];
+
+        assert!(process_matches_managed_agent(
+            Some(Path::new(r"C:\Users\alice\.dbx\agents\jre-21\bin\java.exe")),
+            &java_command,
+            &target
+        ));
+        assert!(process_matches_managed_agent(
+            Some(Path::new(r"\\?\C:\Users\alice\.dbx\agents\drivers\dameng\agent.exe")),
+            &[],
+            &target
+        ));
+        assert!(!process_matches_managed_agent(
+            Some(Path::new(r"C:\Program Files\Java\bin\java.exe")),
+            &[std::ffi::OsString::from(r"C:\tmp\agent.jar")],
+            &target
+        ));
+    }
+
+    #[test]
+    fn managed_jre_process_requires_a_path_boundary() {
+        let target = ManagedAgentProcessTarget::JreDirectory(PathBuf::from(r"C:\Users\alice\.dbx\agents\jre-21"));
+
+        assert!(process_matches_managed_agent(
+            Some(Path::new(r"c:/users/alice/.dbx/agents/jre-21/bin/java.exe")),
+            &[],
+            &target
+        ));
+        assert!(!process_matches_managed_agent(
+            Some(Path::new(r"C:\Users\alice\.dbx\agents\jre-210\bin\java.exe")),
+            &[],
+            &target
+        ));
+    }
 
     #[test]
     fn r2_cache_buster_uses_version_query() {
