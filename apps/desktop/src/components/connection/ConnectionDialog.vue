@@ -5024,6 +5024,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.db_type !== "etcd" &&
     config.db_type !== "consul" &&
     config.db_type !== "starrocks" &&
+    config.db_type !== "doris" &&
     config.db_type !== "mongodb" &&
     config.db_type !== "victoriametrics" &&
     config.db_type !== "zookeeper" &&
