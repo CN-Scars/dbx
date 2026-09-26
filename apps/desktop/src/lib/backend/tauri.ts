@@ -5443,6 +5443,7 @@ export interface TableImportRequest {
   dateTimeFormat?: string;
   preparedSource?: TableImportPreparedSource | null;
   retainSource?: boolean;
+  skipDuplicateRows?: boolean;
 }
 
 export interface TableImportSummary {
