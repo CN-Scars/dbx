@@ -43,6 +43,58 @@ static OCEANBASE_MYSQL_TABLE_OPTION_RE: std::sync::LazyLock<Regex> = std::sync::
 static MYSQL_COLLATE_CLAUSE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r"(?i)\bCOLLATE\s*=?\s*([A-Za-z0-9_]+)\b").expect("valid MySQL COLLATE clause regex")
 });
+
+pub async fn ensure_transfer_source_types_supported(
+    state: &AppState,
+    request: &TransferRequest,
+    source_pool_key: &str,
+) -> Result<(), String> {
+    if matches!(request.content, TransferContent::StructureOnly) {
+        return Ok(());
+    }
+    let is_doris = {
+        let configs = state.configs.read().await;
+        configs
+            .get(&request.source_connection_id)
+            .is_some_and(|config| db::doris::is_native_profile(&config.db_type, config.driver_profile.as_deref()))
+    };
+    if !is_doris {
+        return Ok(());
+    }
+    for table in &request.tables {
+        let columns = get_columns_for_transfer(
+            state,
+            source_pool_key,
+            &request.source_connection_id,
+            &request.source_database,
+            &request.source_schema,
+            table,
+            request.source_catalog.as_deref(),
+        )
+        .await?;
+        ensure_transfer_columns_supported(request, true, table, &columns)?;
+    }
+    Ok(())
+}
+
+fn ensure_transfer_columns_supported(
+    request: &TransferRequest,
+    is_doris_source: bool,
+    table: &str,
+    columns: &[db::ColumnInfo],
+) -> Result<(), String> {
+    if matches!(request.content, TransferContent::StructureOnly) || !is_doris_source {
+        return Ok(());
+    }
+    if let Some(column) = columns.iter().find(|column| crate::types::is_opaque_aggregate_state_type(&column.data_type))
+    {
+        return Err(format!(
+            "Data transfer does not support Doris aggregate-state column `{}` in table `{table}`; export a representation format or use explicit Doris state functions instead",
+            column.name
+        ));
+    }
+    Ok(())
+}
 // An inline FK constraint *definition line*: an optional `CONSTRAINT <name>`
 // prefix followed by `FOREIGN KEY (`. Anchored to the line start so column
 // definitions whose COMMENT/DEFAULT strings mention "foreign key" never match.
@@ -8840,6 +8892,14 @@ pub async fn rename_tables_to_backup<F>(
 where
     F: FnMut(TransferProgress),
 {
+    let source_pool_key = ensure_transfer_pool(
+        state,
+        &request.source_connection_id,
+        &request.source_database,
+        request.source_catalog.as_deref(),
+    )
+    .await?;
+    ensure_transfer_source_types_supported(state, request, &source_pool_key).await?;
     let total_tables = tables.len();
 
     // Resolve target names first so the fail-fast check below sees the names that will
@@ -9418,6 +9478,14 @@ where
     if columns.is_empty() {
         return Err(format!("No columns found for table {table}"));
     }
+
+    let is_doris_source = {
+        let configs = state.configs.read().await;
+        configs
+            .get(&request.source_connection_id)
+            .is_some_and(|config| db::doris::is_native_profile(&config.db_type, config.driver_profile.as_deref()))
+    };
+    ensure_transfer_columns_supported(request, is_doris_source, table, &columns)?;
 
     let writable_columns = writable_transfer_columns(&columns, source_db_type, target_db_type);
     let default_rows_only = mysql_generated_only_transfer(&columns, source_db_type, target_db_type);
@@ -12619,6 +12687,36 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             drop_target_before_create: false,
             drop_target_confirmed: false,
         }
+    }
+
+    #[test]
+    fn transfer_column_validation_rejects_opaque_state_for_actual_doris_table() {
+        let request = test_transfer_request(vec!["first_state", "actual_state"]);
+        let columns = vec![test_column("id", "int"), test_column("v2", "agg_state<group_concat(text)>")];
+
+        let error = ensure_transfer_columns_supported(&request, true, "actual_state", &columns).unwrap_err();
+
+        assert!(error.contains("`v2`"), "{error}");
+        assert!(error.contains("`actual_state`"), "{error}");
+        assert!(!error.contains("first_state"), "{error}");
+    }
+
+    #[test]
+    fn transfer_column_validation_is_doris_data_only_and_structure_aware() {
+        let columns = vec![test_column("v2", "AGG_STATE<SUM(INT)>")];
+        let data_request = test_transfer_request(vec!["states"]);
+        assert!(ensure_transfer_columns_supported(&data_request, false, "states", &columns).is_ok());
+
+        let structure_request = TransferRequest { content: TransferContent::StructureOnly, ..data_request };
+        assert!(ensure_transfer_columns_supported(&structure_request, true, "states", &columns).is_ok());
+    }
+
+    #[test]
+    fn transfer_column_validation_allows_regular_doris_columns() {
+        let request = test_transfer_request(vec!["items"]);
+        let columns = vec![test_column("id", "bigint"), test_column("name", "varchar(64)")];
+
+        assert!(ensure_transfer_columns_supported(&request, true, "items", &columns).is_ok());
     }
 
     #[test]

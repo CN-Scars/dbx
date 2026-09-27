@@ -1241,7 +1241,6 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
     if options.columns.is_empty() || options.rows.is_empty() {
         return Ok(Vec::new());
     }
-
     let excluded_names: HashSet<String> =
         exclude_columns.iter().map(|column| column.trim().to_ascii_uppercase()).collect();
     let table = export_qualified_table_name(
@@ -1274,6 +1273,18 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
                 })
         })
         .collect::<Vec<_>>();
+    if insert_columns.iter().any(|(index, _, _)| {
+        options
+            .column_types
+            .get(*index)
+            .and_then(|column_type| column_type.as_deref())
+            .is_some_and(crate::types::is_opaque_aggregate_state_type)
+    }) {
+        return Err(
+            "SQL INSERT export does not support Doris aggregate-state columns; use a representation export for canonical hex bytes"
+                .to_string(),
+        );
+    }
     if insert_columns.is_empty() {
         // Only fail when the exclusion itself removed the last insertable column;
         // emptiness caused by other omission rules (e.g. generated columns) keeps
@@ -6123,6 +6134,30 @@ mod tests {
             statements,
             vec!["INSERT INTO \"public\".\"users\" (\"name\", \"email\") VALUES ('Ada', 'ada@example.com');"]
         );
+    }
+
+    #[test]
+    fn sql_insert_export_allows_explicitly_excluded_opaque_column() {
+        let statements = build_export_insert_statements_excluding(
+            BuildExportInsertStatementsOptions {
+                database_type: Some(DatabaseType::Doris),
+                identifier_quote: None,
+                schema: None,
+                table_name: Some("states".to_string()),
+                qualified_table_name: None,
+                columns: vec!["id".to_string(), "v2".to_string()],
+                column_types: vec![Some("integer".to_string()), Some("agg_state<sum(int)>".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1), json!("0x00ff")]],
+                batch_size: Some(10),
+            },
+            &["v2".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO `states` (`id`) VALUES (1);"]);
     }
 
     #[test]
