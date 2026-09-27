@@ -33,7 +33,7 @@ use crate::transfer::{
     count_sql_with_where_and_identifier_quote, execute_read_on_pool, execute_read_on_pool_with_max_rows,
     keyset_pagination_sql_with_identifier_quote, pagination_sql_with_filter_order_and_identifier_quote,
 };
-use crate::types::QueryResult;
+use crate::types::{is_opaque_aggregate_state_type, QueryResult};
 use crate::xlsx_export::{finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options};
 
 const DEFAULT_BATCH_SIZE: usize = 10_000;
@@ -233,6 +233,18 @@ fn resolve_requested_export_columns(
 
 fn requested_mysql_sql_export_needs_column_metadata(database_type: DatabaseType, format: &str) -> bool {
     database_type == DatabaseType::Mysql && format.eq_ignore_ascii_case("sql")
+}
+
+fn ensure_sql_insert_export_types_supported(format: &str, column_types: &[Option<String>]) -> Result<(), String> {
+    if format.eq_ignore_ascii_case("sql")
+        && column_types.iter().flatten().any(|column_type| is_opaque_aggregate_state_type(column_type))
+    {
+        return Err(
+            "SQL INSERT export does not support Doris aggregate-state columns; use CSV, JSON, TXT, or XLSX to export their canonical hex representation"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Column EXTRA values supplied by the data grid, filtered and aligned exactly
@@ -1594,6 +1606,7 @@ async fn export_table_data_core_inner(
     if col_names.is_empty() {
         return Err("No columns found for table".to_string());
     }
+    ensure_sql_insert_export_types_supported(&request.format, &column_types)?;
     let query_col_names = table_export_query_columns(request, &sql_context, &col_names)?;
 
     // Use keyset pagination when all PKs are in the selected (filtered) columns.
@@ -2320,6 +2333,16 @@ mod tests {
         .expect("deserialize table export request");
 
         assert_eq!(request.insert_mode, SqlInsertMode::Batch);
+    }
+
+    #[test]
+    fn sql_insert_export_rejects_opaque_aggregate_states_only() {
+        let types = vec![Some("int".to_string()), Some("agg_state<group_concat(text)>".to_string())];
+        assert!(ensure_sql_insert_export_types_supported("sql", &types)
+            .unwrap_err()
+            .contains("does not support Doris aggregate-state"));
+        assert!(ensure_sql_insert_export_types_supported("csv", &types).is_ok());
+        assert!(ensure_sql_insert_export_types_supported("sql", &[Some("varbinary(32)".to_string())]).is_ok());
     }
 
     #[cfg(unix)]

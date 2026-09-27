@@ -113,6 +113,14 @@ import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 const cellDetailPanelSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailPanel.vue", "utf8");
 const cellDetailDialogSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailDialog.vue", "utf8");
 const binaryTextPreviewSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailTextPreview.vue", "utf8");
+const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+
+describe("DataGrid opaque aggregate-state safety", () => {
+  it("blocks cell edits and keyless row deletion through the centralized gates", () => {
+    expect(dataGridSource).toMatch(/function canEditCellItem[\s\S]*isOpaqueAggregateStateColumnType\(allColumnTypes\.value\[columnIndex\]\)/);
+    expect(dataGridSource).toMatch(/function canDeleteRowItem[\s\S]*canUseKeylessRowPredicate[\s\S]*hasUnsafeOpaqueAggregateStatePredicate\(allColumnTypes\.value, item\.data\)/);
+  });
+});
 
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
   return {
