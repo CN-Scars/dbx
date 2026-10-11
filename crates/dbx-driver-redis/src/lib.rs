@@ -582,6 +582,12 @@ impl RedisCollectionOverflowSessions {
 
     fn reinsert(&mut self, cursor: u64, mut session: RedisCollectionOverflowSession) {
         self.remove_expired();
+        while self.entries.len() >= COLLECTION_OVERFLOW_SESSION_LIMIT && !self.entries.contains_key(&cursor) {
+            let Some(oldest) = self.entries.iter().min_by_key(|(_, entry)| entry.last_used).map(|(id, _)| *id) else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
         session.last_used = Instant::now();
         self.entries.insert(cursor, session);
     }
@@ -4845,14 +4851,21 @@ where
     if let Some(page) = take_hash_overflow_page(scope, key, cursor, count, filter_query).await {
         return Ok(page);
     }
-    if cursor >= COLLECTION_OVERFLOW_CURSOR_START {
-        return Err("Collection cursor is invalid, expired, or belongs to a different connection/database".to_string());
-    }
-
-    let (next_cursor, mut items) = if let Some(query) = filter_query {
-        hscan_filtered_page_raw(con, key, cursor, count, query).await?
+    let (scan_cursor, previous_session) =
+        take_collection_scan_cursor(scope, key, cursor, RedisCollectionOverflowKind::Hash, filter_query).await?;
+    let scanned = if let Some(query) = filter_query {
+        hscan_filtered_page_raw(con, key, scan_cursor, count, query).await
     } else {
-        hscan_page_raw(con, key, cursor, count, None).await?
+        hscan_page_raw(con, key, scan_cursor, count, None).await
+    };
+    let (next_cursor, mut items) = match scanned {
+        Ok(page) => page,
+        Err(error) => {
+            if let Some(session) = previous_session {
+                collection_overflow_sessions().lock().await.reinsert(cursor, session);
+            }
+            return Err(error);
+        }
     };
     let page_len = budgeted_page_len(&items, count, hash_item_page_bytes);
     let next_cursor = store_hash_overflow_page(scope, key, &mut items, page_len, next_cursor, filter_query).await;
@@ -4874,14 +4887,21 @@ where
     if let Some(page) = take_set_overflow_page(scope, key, cursor, count, filter_query).await {
         return Ok(page);
     }
-    if cursor >= COLLECTION_OVERFLOW_CURSOR_START {
-        return Err("Collection cursor is invalid, expired, or belongs to a different connection/database".to_string());
-    }
-
-    let (next_cursor, mut items) = if let Some(query) = filter_query {
-        sscan_filtered_page_raw(con, key, cursor, count, query).await?
+    let (scan_cursor, previous_session) =
+        take_collection_scan_cursor(scope, key, cursor, RedisCollectionOverflowKind::Set, filter_query).await?;
+    let scanned = if let Some(query) = filter_query {
+        sscan_filtered_page_raw(con, key, scan_cursor, count, query).await
     } else {
-        sscan_page_raw(con, key, cursor, count).await?
+        sscan_page_raw(con, key, scan_cursor, count).await
+    };
+    let (next_cursor, mut items) = match scanned {
+        Ok(page) => page,
+        Err(error) => {
+            if let Some(session) = previous_session {
+                collection_overflow_sessions().lock().await.reinsert(cursor, session);
+            }
+            return Err(error);
+        }
     };
     let page_len = budgeted_page_len(&items, count, set_item_page_bytes);
     let next_cursor = store_set_overflow_page(scope, key, &mut items, page_len, next_cursor, filter_query).await;
@@ -4903,8 +4923,12 @@ async fn take_hash_overflow_page(
     let mut session =
         sessions.take_matching(cursor, scope, key, RedisCollectionOverflowKind::Hash, filter_query, None)?;
     let page = match &mut session.items {
-        RedisCollectionOverflowItems::Hash(items) => {
+        RedisCollectionOverflowItems::Hash(items) if !items.is_empty() => {
             take_vec_page(items, budgeted_page_len(items, count, hash_item_page_bytes))
+        }
+        RedisCollectionOverflowItems::Hash(_) => {
+            sessions.reinsert(cursor, session);
+            return None;
         }
         RedisCollectionOverflowItems::Set(_) => return None,
     };
@@ -4912,8 +4936,10 @@ async fn take_hash_overflow_page(
         RedisCollectionOverflowItems::Hash(items) => !items.is_empty(),
         RedisCollectionOverflowItems::Set(_) => false,
     };
-    let next_cursor = if has_buffered_items { cursor } else { session.followup_cursor };
-    if has_buffered_items {
+    let retain_cursor =
+        has_buffered_items || (session.followup_cursor != 0 && scope != &RedisOperationScope::default());
+    let next_cursor = if retain_cursor { cursor } else { session.followup_cursor };
+    if retain_cursor {
         sessions.reinsert(cursor, session);
     }
     Some((next_cursor, page))
@@ -4934,8 +4960,12 @@ async fn take_set_overflow_page(
     let mut session =
         sessions.take_matching(cursor, scope, key, RedisCollectionOverflowKind::Set, filter_query, None)?;
     let page = match &mut session.items {
-        RedisCollectionOverflowItems::Set(items) => {
+        RedisCollectionOverflowItems::Set(items) if !items.is_empty() => {
             take_vec_page(items, budgeted_page_len(items, count, set_item_page_bytes))
+        }
+        RedisCollectionOverflowItems::Set(_) => {
+            sessions.reinsert(cursor, session);
+            return None;
         }
         RedisCollectionOverflowItems::Hash(_) => return None,
     };
@@ -4943,8 +4973,10 @@ async fn take_set_overflow_page(
         RedisCollectionOverflowItems::Set(items) => !items.is_empty(),
         RedisCollectionOverflowItems::Hash(_) => false,
     };
-    let next_cursor = if has_buffered_items { cursor } else { session.followup_cursor };
-    if has_buffered_items {
+    let retain_cursor =
+        has_buffered_items || (session.followup_cursor != 0 && scope != &RedisOperationScope::default());
+    let next_cursor = if retain_cursor { cursor } else { session.followup_cursor };
+    if retain_cursor {
         sessions.reinsert(cursor, session);
     }
     Some((next_cursor, page))
@@ -4958,11 +4990,11 @@ async fn store_hash_overflow_page(
     followup_cursor: u64,
     filter_query: Option<&str>,
 ) -> u64 {
-    if items.len() <= count {
+    if items.len() <= count && (followup_cursor == 0 || scope == &RedisOperationScope::default()) {
         return followup_cursor;
     }
 
-    let overflow = items.split_off(count);
+    let overflow = items.split_off(count.min(items.len()));
     let session = RedisCollectionOverflowSession {
         scope: scope.clone(),
         key: key.to_vec(),
@@ -4984,11 +5016,11 @@ async fn store_set_overflow_page(
     followup_cursor: u64,
     filter_query: Option<&str>,
 ) -> u64 {
-    if items.len() <= count {
+    if items.len() <= count && (followup_cursor == 0 || scope == &RedisOperationScope::default()) {
         return followup_cursor;
     }
 
-    let overflow = items.split_off(count);
+    let overflow = items.split_off(count.min(items.len()));
     let session = RedisCollectionOverflowSession {
         scope: scope.clone(),
         key: key.to_vec(),
@@ -5000,6 +5032,27 @@ async fn store_set_overflow_page(
         last_used: Instant::now(),
     };
     collection_overflow_sessions().lock().await.insert(session)
+}
+
+async fn take_collection_scan_cursor(
+    scope: &RedisOperationScope,
+    key: &[u8],
+    cursor: u64,
+    kind: RedisCollectionOverflowKind,
+    filter_query: Option<&str>,
+) -> Result<(u64, Option<RedisCollectionOverflowSession>), String> {
+    if cursor == 0 {
+        return Ok((0, None));
+    }
+    if let Some(session) =
+        collection_overflow_sessions().lock().await.take_matching(cursor, scope, key, kind, filter_query, None)
+    {
+        return Ok((session.followup_cursor, Some(session)));
+    }
+    if cursor >= COLLECTION_OVERFLOW_CURSOR_START || scope != &RedisOperationScope::default() {
+        return Err("Collection cursor is invalid, expired, or belongs to a different connection/database".to_string());
+    }
+    Ok((cursor, None))
 }
 
 /// How many leading items fit in one page, honouring both the item count and the byte budget.
@@ -5840,6 +5893,159 @@ mod tests {
         assert_eq!(items[0].member, redis_blob_from_bytes(b"b"));
         assert_eq!(scan_cursor, None);
         assert!(wrong.commands.is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_collection_cursors_reject_foreign_scope_key_kind_and_filter() {
+        for key_type in ["hash", "set"] {
+            let scope = super::RedisOperationScope { connection_id: format!("native-{key_type}"), db: 1 };
+            let response = if key_type == "hash" {
+                hscan_response("128", vec![("field", "value")])
+            } else {
+                scan_response("128", vec!["member"])
+            };
+            let mut first = FakeRedisConnection::new(vec![response, httl_response(1, -1)]);
+            let page = super::load_more_collection_scoped(&mut first, b"key", key_type, 0, 2, None, None, &scope)
+                .await
+                .unwrap();
+            let cursor = match page {
+                RedisCollectionPage::Hash { scan_cursor, .. } | RedisCollectionPage::Set { scan_cursor, .. } => {
+                    scan_cursor.unwrap()
+                }
+                _ => panic!("expected collection"),
+            };
+            assert!(cursor >= super::COLLECTION_OVERFLOW_CURSOR_START);
+            let mut wrong = FakeRedisConnection::new(vec![]);
+            let other_kind = if key_type == "hash" { "set" } else { "hash" };
+            for (wrong_scope, wrong_key, wrong_kind, wrong_filter) in [
+                (super::RedisOperationScope { db: 0, ..scope.clone() }, b"key".as_slice(), key_type, None),
+                (
+                    super::RedisOperationScope { connection_id: "foreign".to_string(), ..scope.clone() },
+                    b"key".as_slice(),
+                    key_type,
+                    None,
+                ),
+                (scope.clone(), b"other".as_slice(), key_type, None),
+                (scope.clone(), b"key".as_slice(), other_kind, None),
+                (scope.clone(), b"key".as_slice(), key_type, Some("filter")),
+            ] {
+                assert!(super::load_more_collection_scoped(
+                    &mut wrong,
+                    wrong_key,
+                    wrong_kind,
+                    cursor,
+                    2,
+                    wrong_filter,
+                    None,
+                    &wrong_scope
+                )
+                .await
+                .is_err());
+            }
+            assert!(super::load_more_collection_scoped(&mut wrong, b"key", key_type, 128, 2, None, None, &scope)
+                .await
+                .is_err());
+            assert!(wrong.commands.is_empty());
+            let response = if key_type == "hash" {
+                hscan_response("0", vec![("next", "value")])
+            } else {
+                scan_response("0", vec!["next"])
+            };
+            let mut owner = FakeRedisConnection::new(vec![response, httl_response(1, -1)]);
+            let page = super::load_more_collection_scoped(&mut owner, b"key", key_type, cursor, 2, None, None, &scope)
+                .await
+                .unwrap();
+            assert!(owner.commands[0].contains("\r\n128\r\n"));
+            match page {
+                RedisCollectionPage::Hash { items, scan_cursor } => {
+                    assert_eq!(items[0].field, redis_blob_from_bytes(b"next"));
+                    assert_eq!(scan_cursor, None);
+                }
+                RedisCollectionPage::Set { items, scan_cursor } => {
+                    assert_eq!(items[0].member, redis_blob_from_bytes(b"next"));
+                    assert_eq!(scan_cursor, None);
+                }
+                _ => panic!("expected collection"),
+            }
+            assert!(!super::collection_overflow_sessions().lock().await.entries.contains_key(&cursor));
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_collection_overflow_keeps_followup_scoped_and_retries_failed_scan() {
+        for key_type in ["hash", "set"] {
+            let scope = super::RedisOperationScope { connection_id: format!("followup-{key_type}"), db: 1 };
+            let response = if key_type == "hash" {
+                hscan_response("128", vec![("one", "value"), ("two", "value")])
+            } else {
+                scan_response("128", vec!["one", "two"])
+            };
+            let mut first = FakeRedisConnection::new(vec![response, httl_response(1, -1)]);
+            let page = super::load_more_collection_scoped(&mut first, b"key", key_type, 0, 1, None, None, &scope)
+                .await
+                .unwrap();
+            let cursor = match page {
+                RedisCollectionPage::Hash { scan_cursor, .. } | RedisCollectionPage::Set { scan_cursor, .. } => {
+                    scan_cursor.unwrap()
+                }
+                _ => panic!("expected collection"),
+            };
+            let mut buffered = FakeRedisConnection::new(vec![httl_response(1, -1)]);
+            let page =
+                super::load_more_collection_scoped(&mut buffered, b"key", key_type, cursor, 1, None, None, &scope)
+                    .await
+                    .unwrap();
+            match page {
+                RedisCollectionPage::Hash { scan_cursor, .. } | RedisCollectionPage::Set { scan_cursor, .. } => {
+                    assert_eq!(scan_cursor, Some(cursor));
+                }
+                _ => panic!("expected collection"),
+            }
+            assert_eq!(buffered.command_count("HSCAN") + buffered.command_count("SSCAN"), 0);
+            let mut wrong = FakeRedisConnection::new(vec![]);
+            assert!(super::load_more_collection_scoped(
+                &mut wrong,
+                b"key",
+                key_type,
+                cursor,
+                1,
+                None,
+                None,
+                &super::RedisOperationScope { db: 0, ..scope.clone() }
+            )
+            .await
+            .is_err());
+            assert!(wrong.commands.is_empty());
+            let mut failed = FakeRedisConnection::with_results(vec![Err(redis::RedisError::from((
+                redis::ErrorKind::Io,
+                "temporary scan failure",
+            )))]);
+            assert!(super::load_more_collection_scoped(&mut failed, b"key", key_type, cursor, 1, None, None, &scope)
+                .await
+                .is_err());
+            assert!(super::collection_overflow_sessions().lock().await.entries.contains_key(&cursor));
+            let response = if key_type == "hash" {
+                hscan_response("0", vec![("three", "value")])
+            } else {
+                scan_response("0", vec!["three"])
+            };
+            let mut retry = FakeRedisConnection::new(vec![response, httl_response(1, -1)]);
+            let page = super::load_more_collection_scoped(&mut retry, b"key", key_type, cursor, 1, None, None, &scope)
+                .await
+                .unwrap();
+            match page {
+                RedisCollectionPage::Hash { items, scan_cursor } => {
+                    assert_eq!(items[0].field, redis_blob_from_bytes(b"three"));
+                    assert_eq!(scan_cursor, None);
+                }
+                RedisCollectionPage::Set { items, scan_cursor } => {
+                    assert_eq!(items[0].member, redis_blob_from_bytes(b"three"));
+                    assert_eq!(scan_cursor, None);
+                }
+                _ => panic!("expected collection"),
+            }
+            assert!(retry.commands[0].contains("\r\n128\r\n"));
+        }
     }
 
     #[tokio::test]
