@@ -2389,6 +2389,7 @@ dependencies = [
  "dbx-sql-core",
  "dbx-sql-dialect",
  "dbx-types",
+ "encoding_rs",
  "futures",
  "log",
  "mysql_async",

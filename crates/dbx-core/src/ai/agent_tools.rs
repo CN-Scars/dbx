@@ -2579,6 +2579,7 @@ for line in sys.stdin:
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows,
             affected_rows,

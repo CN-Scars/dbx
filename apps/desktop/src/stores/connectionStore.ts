@@ -205,6 +205,7 @@ import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } f
 import { buildPackageMemberNodes, markPackageNodesExpandable, packageMemberGroupOwnerId } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { withoutSshLocalPorts } from "@/lib/connection/sshLocalPort";
+import { mysqlDataCharsetChanged, mysqlDataCharsetChangeBlocked } from "@/lib/connection/mysqlDataCharset";
 import { driverProfileObjectTreeProfileForConnection } from "@/lib/database/driverProfileExtensions";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
@@ -4693,6 +4694,14 @@ export const useConnectionStore = defineStore("connection", () => {
     // Edit forms do not own server-derived hints. Retain the previous hint only
     // while its protected URL still refers to the same saved JDBC target.
     config = { ...config, jdbc_dialect: keepsSavedJdbcTarget ? previousConfig.jdbc_dialect : undefined };
+    if (mysqlDataCharsetChanged(previousConfig, config)) {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      if (mysqlDataCharsetChangeBlocked(useQueryStore().tabs, config.id)) throw new Error(i18n.global.t("connection.mysqlDataCharsetCloseTabs"));
+      // Retire the old decoding session before publishing a potentially writable
+      // config. Preserve SQL drafts and do not silently discard grid edits.
+      await disconnect(config.id, { skipTabHandling: true, markClosedByUser: false });
+      if (mysqlDataCharsetChangeBlocked(useQueryStore().tabs, config.id)) throw new Error(i18n.global.t("connection.mysqlDataCharsetCloseTabs"));
+    }
     const previousDatabase = previousConfig.database ?? "";
     const runtimeConfigChanged = connectionConfigFingerprint(previousConfig) !== connectionConfigFingerprint(config);
     const shouldReconnectPlugin = runtimeConfigChanged && previousConfig.db_type === "plugin" && config.db_type === "plugin" && connectedIds.value.has(config.id);

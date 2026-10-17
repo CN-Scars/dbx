@@ -186,6 +186,7 @@ import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutio
 import { exactOracleTriggerMetadata, oracleTriggerObjectReadOptions, oracleTriggerReadOptions } from "@/lib/database/oracleTriggerIdentity";
 import { tablePageRowAnchorKey } from "@/lib/table/tableTree";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
@@ -3820,6 +3821,10 @@ async function exportDataLegacy(row: ObjectBrowserRow, format: "json") {
 }
 
 async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql", insertDialect: SqlInsertDialect = "source") {
+  if (format === "sql" && mysqlDataCharsetEnabled(props.connection)) {
+    toast(t("connection.mysqlDataCharsetExportHint"), 5000);
+    return;
+  }
   if (format === "json" && !isTauriRuntime()) {
     await exportDataLegacy(row, format);
     return;
@@ -5548,7 +5553,7 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
     { label: "CSV", action: () => exportData(item, "csv") },
     { label: "JSON", action: () => exportData(item, "json") },
   ];
-  if (!isVictoriaMetrics.value) {
+  if (!isVictoriaMetrics.value && !mysqlDataCharsetEnabled(props.connection)) {
     formats.push({ label: "SQL INSERT", action: () => exportData(item, "sql", "source") });
     formats.push({ sidebarActionId: "contextMenu.standardSqlInsert", label: t("contextMenu.standardSqlInsert"), action: () => exportData(item, "sql", "standard") });
   }

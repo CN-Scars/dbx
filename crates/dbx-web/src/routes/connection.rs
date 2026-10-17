@@ -633,7 +633,9 @@ pub async fn unlock_connection_writes(
     )
     .await?;
     let remaining_ms =
-        state.app.write_unlock_windows.unlock(&body.connection_id, body.duration_secs).await.map_err(AppError::from)?;
+        dbx_core::query::unlock_connection_writes_core(&state.app, &body.connection_id, body.duration_secs)
+            .await
+            .map_err(AppError::from)?;
     Ok(Json(WriteUnlockStateResponse { remaining_ms }))
 }
 
