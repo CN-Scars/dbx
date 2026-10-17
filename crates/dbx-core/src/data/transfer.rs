@@ -9196,6 +9196,18 @@ pub fn should_transfer_schema_objects(
 /// outcome. Executes in dependency order (sequence → view → function →
 /// procedure → trigger → event). Errors are collected per object and the
 /// transfer continues.
+pub async fn check_data_charset_transfer(state: &AppState, request: &TransferRequest) -> Result<(), String> {
+    for connection_id in [&request.source_connection_id, &request.target_connection_id] {
+        crate::query::mysql_data_charset_policy::reject_operation(
+            state,
+            connection_id,
+            crate::query::mysql_data_charset_policy::TRANSFER_UNSUPPORTED,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 pub async fn transfer_schema_objects<F>(
     state: &AppState,
     request: &TransferRequest,
@@ -9206,6 +9218,7 @@ pub async fn transfer_schema_objects<F>(
 where
     F: FnMut(TransferProgress),
 {
+    check_data_charset_transfer(state, request).await?;
     if matches!(request.content, TransferContent::DataOnly) {
         return Ok(TransferObjectOutcome::default());
     }
@@ -11399,6 +11412,7 @@ pub async fn rename_tables_to_backup<F>(
 where
     F: FnMut(TransferProgress),
 {
+    check_data_charset_transfer(state, request).await?;
     let source_pool_key = ensure_transfer_pool(
         state,
         &request.source_connection_id,
@@ -13026,6 +13040,7 @@ pub async fn drop_backup_tables(
     backup_names: &HashMap<String, String>,
     drop_order: &[String],
 ) -> Result<(), String> {
+    check_data_charset_transfer(state, request).await?;
     let mut ordered: Vec<&String> = drop_order.iter().filter(|table| backup_names.contains_key(*table)).collect();
     let mut leftovers: Vec<&String> = backup_names.keys().filter(|table| !drop_order.contains(*table)).collect();
     leftovers.sort();
@@ -13140,6 +13155,7 @@ where
     F: FnMut(TransferProgress),
     C: FnMut(Option<u64>),
 {
+    check_data_charset_transfer(state, request).await?;
     validate_transfer_database_pair(request, source_db_type, target_db_type)?;
     let state = state.clone();
     let request = request.clone();
@@ -14461,6 +14477,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             column_types: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows,
             affected_rows: 0,

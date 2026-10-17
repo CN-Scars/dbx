@@ -585,11 +585,10 @@ pub async fn unlock_connection_writes(
     State(state): State<Arc<WebState>>,
     Json(body): Json<UnlockConnectionWritesRequest>,
 ) -> Result<Json<WriteUnlockStateResponse>, AppError> {
-    if !state.app.configs.read().await.contains_key(&body.connection_id) {
-        return Err(AppError::from("Connection not found".to_string()));
-    }
     let remaining_ms =
-        state.app.write_unlock_windows.unlock(&body.connection_id, body.duration_secs).await.map_err(AppError::from)?;
+        dbx_core::query::unlock_connection_writes_core(&state.app, &body.connection_id, body.duration_secs)
+            .await
+            .map_err(AppError::from)?;
     Ok(Json(WriteUnlockStateResponse { remaining_ms }))
 }
 
