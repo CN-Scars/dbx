@@ -9893,6 +9893,7 @@ pub async fn transfer_schema_objects<F>(
 where
     F: FnMut(TransferProgress),
 {
+    check_data_charset_transfer(state, request).await?;
     if request.has_package_selection() {
         let source_db_type = get_db_type(state, &request.source_connection_id).await?;
         let target_db_type = get_db_type(state, &request.target_connection_id).await?;

@@ -74,6 +74,10 @@ export async function legacyLargeValueRowPredicate(context: LegacyLargeValueCont
   const row = context.rows[sourceIndex];
   if (!row) throw new Error(options.translate("grid.largeValueRowUnavailable"));
   const keyValues = contextKeyLocator(context, primaryKeyIndexes, options).values(sourceIndex);
+  return legacyLargeValueKeyPredicate(context, keyValues, options);
+}
+
+async function legacyLargeValueKeyPredicate(context: LegacyLargeValueContext, keyValues: CellValue[], options: ReaderOptions): Promise<string> {
   const table = context.tableMeta!;
   const conditions = await Promise.all(
     table.primaryKeys.map((columnName, index) =>
@@ -95,7 +99,10 @@ export async function fetchLegacyLargeValueRequestChunk(context: LegacyLargeValu
   const table = context.tableMeta!;
   const sourceColumn = context.sourceColumns[columnIndex];
   if (!sourceColumn) throw new Error(options.translate("grid.largeValueColumnUnavailable"));
-  const predicates = await Promise.all(requests.map((request) => legacyLargeValueRowPredicate(context, request.sourceIndex, primaryKeyIndexes, options)));
+  // Reuse one index for the batch instead of rescanning all captured keys for
+  // every row's predicate and again for result matching.
+  const sourceLocator = contextKeyLocator(context, primaryKeyIndexes, options);
+  const predicates = await Promise.all(requests.map((request) => legacyLargeValueKeyPredicate(context, sourceLocator.values(request.sourceIndex), options)));
   const selectedColumns = [...new Set([...table.primaryKeys, sourceColumn])];
   const sql = await buildTableSelectSql({
     databaseType: context.databaseType,
@@ -140,7 +147,6 @@ export async function fetchLegacyLargeValueRequestChunk(context: LegacyLargeValu
   const keyIndexes = resultIndexes.slice(0, table.primaryKeys.length);
   const valueIndex = resultIndexes[selectedColumns.indexOf(sourceColumn)]!;
   if ((beforeRead || context.requiresOriginalKeys) && result.large_value_cells?.some((cell) => cell.column_index === valueIndex || keyIndexes.includes(cell.column_index))) throw new Error(options.translate("grid.largeValueLoadFailed"));
-  const sourceLocator = contextKeyLocator(context, primaryKeyIndexes, options);
   const resultLocator = createResultKeyLocator(result, keyIndexes, context.requiresOriginalKeys === true, options.translate("grid.largeValueOriginalKeyUnavailable"));
   const values = new Map<string, CellValue>();
   for (const [rowIndex, row] of result.rows.entries()) {

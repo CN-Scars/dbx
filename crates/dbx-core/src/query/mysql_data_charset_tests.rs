@@ -352,3 +352,43 @@ async fn compatibility_transfer_rejects_source_and_target_before_dispatch() {
     }
     assert!(state.connection_pools_snapshot().await.is_empty());
 }
+
+#[tokio::test]
+async fn compatibility_schema_transfer_rejects_before_data_only_shortcut_or_package_approval() {
+    let (_directory, state) = fixture().await;
+    for (source, target) in [("conn-1", "unconfigured"), ("unconfigured", "conn-1")] {
+        for content in ["dataOnly", "structureOnly", "structureAndData"] {
+            for packages in [false, true] {
+                let request: crate::transfer::TransferRequest = serde_json::from_value(serde_json::json!({
+                    "transferId": "legacy-schema-transfer", "sourceConnectionId": source,
+                    "sourceDatabase": "db", "sourceSchema": "db", "targetConnectionId": target,
+                    "targetDatabase": "db", "targetSchema": "db", "tables": [],
+                    "createTable": false, "batchSize": 100, "content": content,
+                    "objects": if packages { serde_json::json!([{"objectType":"PACKAGE_BODY", "names":["pkg"]}]) } else { serde_json::json!([]) },
+                })).unwrap();
+                let error = crate::transfer::transfer_schema_objects(
+                    &state,
+                    &request,
+                    "missing-source",
+                    "missing-target",
+                    |_| panic!("policy rejection must precede package approval progress"),
+                )
+                .await
+                .unwrap_err();
+                assert!(error.starts_with(policy::TRANSFER_UNSUPPORTED), "{content}, packages={packages}: {error}");
+                let error = crate::transfer::transfer_schema_objects_with_routine_context(
+                    &state,
+                    &request,
+                    "missing-source",
+                    "missing-target",
+                    None,
+                    |_| panic!("direct inner entry must retain the same protection"),
+                )
+                .await
+                .unwrap_err();
+                assert!(error.starts_with(policy::TRANSFER_UNSUPPORTED), "{error}");
+            }
+        }
+    }
+    assert!(state.connection_pools_snapshot().await.is_empty());
+}

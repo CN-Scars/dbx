@@ -6,6 +6,7 @@ import { binaryCellDisplayText, binaryCellDownloadPayload } from "@/lib/dataGrid
 import { useDataGridLargeValues } from "@/composables/useDataGridLargeValues";
 import { useDataGridEditor } from "@/composables/useDataGridEditor";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
+import { fetchLegacyLargeValueRequestChunk, type LegacyLargeValueContext, type LegacyResolvedLargeValueCells } from "@/lib/dataGrid/legacyLargeValueExport";
 import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
@@ -292,6 +293,49 @@ describe("useDataGridLargeValues", () => {
     expect(mocks.buildDataGridContextFilterCondition).toHaveBeenCalledWith(expect.objectContaining({ value: "çÍ·×" }));
     expect(mocks.executeMulti).toHaveBeenCalledWith("mysql-1", "MAXIMO", expect.any(String), undefined, "execution-1", expect.objectContaining({ resultKeyColumns: ["ID"] }));
     expect(resolved.get(1)?.get(1)).toBe("完整文本");
+  });
+
+  it("indexes captured original keys once per full export batch while matching reordered results", async () => {
+    const rowCount = 200;
+    let keyReads = 0;
+    const rawKeyCells = Array.from({ length: rowCount }, (_, row_index) => ({
+      row_index,
+      column_index: 0,
+      get value() {
+        keyReads++;
+        return `carrier-${row_index}`;
+      },
+    }));
+    const context: LegacyLargeValueContext = {
+      databaseType: "mysql",
+      connectionId: "mysql-1",
+      executionDatabase: "app",
+      tableMeta: { tableName: "items", columns: [], primaryKeys: ["id"] },
+      sourceColumns: ["id", "body"],
+      rows: Array.from({ length: rowCount }, () => ["same decoded key", "prefix"]),
+      rawKeyCells,
+      requiresOriginalKeys: true,
+      identifierQuote: "`",
+      serverVersion: undefined,
+      includeDatabaseName: true,
+      includeRowId: false,
+      timeoutSecs: 30,
+    };
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue("predicate");
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT id, body FROM items");
+    mocks.executeMulti.mockResolvedValue([
+      {
+        columns: ["id", "body"],
+        rows: Array.from({ length: rowCount }, (_, index) => ["same decoded key", `full-${rowCount - index - 1}`]),
+        raw_key_cells: Array.from({ length: rowCount }, (_, row_index) => ({ row_index, column_index: 0, value: `carrier-${rowCount - row_index - 1}` })),
+      },
+    ]);
+    const requests = Array.from({ length: rowCount }, (_, sourceIndex) => ({ rowId: sourceIndex + 1, sourceIndex, columnIndex: 1, originalBytes: 20000 }));
+    const resolved: LegacyResolvedLargeValueCells = new Map();
+    await fetchLegacyLargeValueRequestChunk(context, 1, requests, [0], resolved, { uuid: () => "export", translate: (key) => key, translateBackendError: String });
+    expect(keyReads).toBe(rowCount);
+    expect(mocks.buildDataGridContextFilterCondition).toHaveBeenCalledTimes(rowCount);
+    for (let index = 0; index < rowCount; index++) expect(resolved.get(index + 1)?.get(1)).toBe(`full-${index}`);
   });
 
   it("matches composite original keys when different carriers have identical decoded display keys", async () => {

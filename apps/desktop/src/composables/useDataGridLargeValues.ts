@@ -484,6 +484,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
   options.runtimeScope.addCleanup(pauseVisibleLargeValuePreviewHydration);
 
   function captureLegacyContext(sourceIndexes: number[]): LegacyLargeValueContext {
+    const selectedSourceIndexes = new Set(sourceIndexes);
     const connectionId = options.connectionId.value;
     const connection = connectionId ? options.getConnectionConfig(connectionId) : undefined;
     const tableMeta = options.tableMeta.value;
@@ -494,7 +495,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       tableMeta: tableMeta ? JSON.parse(JSON.stringify(tableMeta)) : undefined,
       sourceColumns: [...options.resultSourceColumns.value],
       requiresOriginalKeys: requiresOriginalKeys(),
-      rawKeyCells: options.result.value.raw_key_cells?.filter((cell) => sourceIndexes.includes(cell.row_index)).map((cell) => ({ ...cell })),
+      rawKeyCells: options.result.value.raw_key_cells?.filter((cell) => selectedSourceIndexes.has(cell.row_index)).map((cell) => ({ ...cell })),
       rows: sourceIndexes.reduce<CellValue[][]>((rows, index) => {
         const row = options.result.value.rows[index];
         if (row) rows[index] = JSON.parse(JSON.stringify(row));

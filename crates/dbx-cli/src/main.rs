@@ -1285,6 +1285,7 @@ mod tests {
             deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows: vec![vec![serde_json::from_str(value).unwrap()]],
             affected_rows: 0,
